@@ -1,0 +1,11 @@
+torch>=1.9.0
+torchvision>=0.10.0
+numpy>=1.21.0
+opencv-python>=4.5.0
+mediapipe>=0.10.0
+scikit-learn>=1.0.0
+flask>=2.0.0
+flask-socketio>=5.0.0
+SpeechRecognition>=3.10.0
+PyAudio>=0.2.13
+pyttsx3>=2.90

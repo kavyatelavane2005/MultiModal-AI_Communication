@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MultiModal Bridge - Communication System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- Top Navigation -->
+    <nav class="top-nav">
+        <div class="nav-brand">
+            <div class="brand-icon">&#9995;</div>
+            <div>
+                <h1>MultiModal Bridge</h1>
+                <span class="nav-subtitle">AI Communication System</span>
+            </div>
+        </div>
+        <div class="nav-status">
+            <div class="status-dot" id="connectionDot"></div>
+            <span id="connectionText">Connecting...</span>
+        </div>
+    </nav>
+
+    <!-- Mode Selector -->
+    <div class="mode-selector">
+        <button class="mode-btn active" id="btnSLR" onclick="switchMode('slr')">
+            <span class="mode-icon">&#9995;</span>
+            <span>Sign Language</span>
+        </button>
+        <button class="mode-btn" id="btnSTT" onclick="switchMode('stt')">
+            <span class="mode-icon">&#127908;</span>
+            <span>Speech to Text</span>
+        </button>
+        <button class="mode-btn" id="btnTTS" onclick="switchMode('tts')">
+            <span class="mode-icon">&#128264;</span>
+            <span>Text to Speech</span>
+        </button>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-container">
+
+        <!-- Left Panel: Video / Input -->
+        <div class="panel video-panel">
+            <div class="panel-header">
+                <h2 id="inputPanelTitle">Camera Feed</h2>
+                <div class="panel-controls">
+                    <button class="ctrl-btn" id="btnToggle" onclick="toggleActive()">
+                        <span id="toggleIcon">&#9654;</span>
+                        <span id="toggleText">Start</span>
+                    </button>
+                    <button class="ctrl-btn secondary" id="btnReset" onclick="resetBuffer()">Reset</button>
+                </div>
+            </div>
+
+            <!-- SLR: Camera View -->
+            <div class="video-container" id="slrView">
+                <video id="webcam" autoplay playsinline muted></video>
+                <canvas id="overlayCanvas"></canvas>
+                <div class="video-overlay" id="videoOverlay">
+                    <span>Click Start to begin</span>
+                </div>
+                <!-- Buffer Bar -->
+                <div class="buffer-bar-container">
+                    <div class="buffer-bar" id="bufferBar"></div>
+                    <span class="buffer-text" id="bufferText">Buffer: 0%</span>
+                </div>
+            </div>
+
+            <!-- STT: Microphone View -->
+            <div class="mic-container hidden" id="sttView">
+                <div class="mic-circle" id="micCircle">
+                    <div class="mic-icon">&#127908;</div>
+                    <div class="mic-waves" id="micWaves"></div>
+                </div>
+                <p class="mic-status" id="micStatus">Click Start to listen</p>
+            </div>
+
+            <!-- TTS: Text Input View -->
+            <div class="tts-container hidden" id="ttsView">
+                <textarea id="ttsInput" placeholder="Type text here to speak it aloud..." rows="6"></textarea>
+                <div class="tts-controls">
+                    <select id="voiceSelect"></select>
+                    <div class="tts-sliders">
+                        <label>Speed: <input type="range" id="ttsRate" min="0.5" max="2" step="0.1" value="1"><span id="rateVal">1.0</span></label>
+                        <label>Pitch: <input type="range" id="ttsPitch" min="0" max="2" step="0.1" value="1"><span id="pitchVal">1.0</span></label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Output / Conversation -->
+        <div class="panel output-panel">
+            <div class="panel-header">
+                <h2>Output</h2>
+                <button class="ctrl-btn secondary" onclick="clearOutput()">Clear</button>
+            </div>
+
+            <!-- Current Prediction Display -->
+            <div class="prediction-display" id="predictionDisplay">
+                <div class="prediction-label">Detected Sign</div>
+                <div class="prediction-word" id="predictionWord">---</div>
+                <div class="prediction-confidence" id="predictionConf">Waiting...</div>
+            </div>
+
+            <!-- Top-5 Predictions -->
+            <div class="top5-container" id="top5Container">
+                <h3>Top Predictions</h3>
+                <div id="top5List"></div>
+            </div>
+
+            <!-- Conversation Log -->
+            <div class="conversation-log" id="conversationLog">
+                <div class="log-entry system">
+                    <span class="log-time"></span>
+                    <span class="log-text">System ready. Select a mode and click Start.</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

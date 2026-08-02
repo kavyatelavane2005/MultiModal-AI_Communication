@@ -1,0 +1,8 @@
+This directory contains the pre-trained TGCN model files.
+
+Required files:
+  - asl100.ini    (model configuration)
+  - ckpt.pth      (model weights)
+
+These files should be copied from:
+  C:\Users\Kartik\Downloads\archived\archived\asl100\

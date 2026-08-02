@@ -1,0 +1,27 @@
+# Virtual Environment
+asl/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Model weights (too large for GitHub)
+models/tgcn/ckpt.pth
+models/holistic_landmarker.task
+
+# Temp files
+*.log
+*.tmp
+check_imports.py
+install_deps.py
+run_test_speech.bat
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
