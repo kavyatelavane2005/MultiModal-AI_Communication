@@ -31,12 +31,15 @@ let userBRole = 'normal';
 let availableInputs = ['sign', 'speech', 'text'];
 let outputModes = ['text', 'tts', 'avatar'];
 
+let selectedCameraId = localStorage.getItem('preferredCameraId') || null;
+
 // ================================================================
 //  Initialize
 // ================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
     initSocket();
+    initCameraList();
 });
 
 // ================================================================
@@ -316,6 +319,75 @@ function stopAllInputs() {
 }
 
 // ================================================================
+//  Camera Selection & Management
+// ================================================================
+
+async function initCameraList() {
+    const select = document.getElementById('cameraSelect');
+    if (!select || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+
+        if (videoDevices.length === 0) return;
+
+        select.innerHTML = '';
+        let laptopCamId = null;
+
+        videoDevices.forEach((device, idx) => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            const label = device.label || `Camera ${idx + 1}`;
+            option.textContent = label;
+
+            // Detect likely laptop built-in webcam
+            const lowerLabel = label.toLowerCase();
+            const isPhoneOrVirtual = lowerLabel.includes('phone') || lowerLabel.includes('droid') || 
+                                     lowerLabel.includes('link') || lowerLabel.includes('virtual') || 
+                                     lowerLabel.includes('cellular') || lowerLabel.includes('continuity');
+            const isLaptopCam = lowerLabel.includes('integrated') || lowerLabel.includes('internal') || 
+                                lowerLabel.includes('built-in') || lowerLabel.includes('webcam') || 
+                                lowerLabel.includes('hd') || lowerLabel.includes('front');
+
+            if (!laptopCamId && isLaptopCam && !isPhoneOrVirtual) {
+                laptopCamId = device.deviceId;
+            }
+
+            select.appendChild(option);
+        });
+
+        // Determine which device to select:
+        // 1. User's saved preference
+        // 2. Detected laptop camera
+        // 3. First non-phone device, or first device
+        const targetId = selectedCameraId || laptopCamId || (
+            videoDevices.find(d => {
+                const l = d.label.toLowerCase();
+                return !l.includes('phone') && !l.includes('droid') && !l.includes('virtual');
+            }) || videoDevices[0]
+        ).deviceId;
+
+        select.value = targetId;
+        selectedCameraId = targetId;
+    } catch (e) {
+        console.warn('Could not enumerate cameras:', e);
+    }
+}
+
+function switchCameraDevice(deviceId) {
+    selectedCameraId = deviceId;
+    localStorage.setItem('preferredCameraId', deviceId);
+    addLog('Camera switched to selected device', 'info');
+
+    // If camera is currently active, restart stream with new device
+    if (isInputActive && currentInputMode === 'sign') {
+        stopSLR();
+        setTimeout(startSLR, 200);
+    }
+}
+
+// ================================================================
 //  SLR — Sign Language Recognition
 // ================================================================
 
@@ -323,11 +395,25 @@ function startSLR() {
     const video = document.getElementById('webcam');
     const overlay = document.getElementById('videoOverlay');
 
-    navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+    // Build constraints: prefer user facing and selected laptop deviceId
+    const videoConstraints = {
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        facingMode: "user"
+    };
+
+    if (selectedCameraId) {
+        videoConstraints.deviceId = { exact: selectedCameraId };
+    }
+
+    navigator.mediaDevices.getUserMedia({ video: videoConstraints })
         .then(stream => {
             webcamStream = stream;
             video.srcObject = stream;
             overlay.classList.add('hidden');
+
+            // Refresh camera list once permissions are granted so labels appear
+            initCameraList();
 
             socket.emit('start_slr');
             addLog('Sign language recognition started', 'success');
@@ -338,6 +424,28 @@ function startSLR() {
             }, 100);
         })
         .catch(err => {
+            // If exact deviceId failed, fallback to any user-facing camera
+            if (selectedCameraId) {
+                console.warn('Failed with specific camera, falling back to facingMode: user...');
+                selectedCameraId = null;
+                navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } })
+                    .then(stream => {
+                        webcamStream = stream;
+                        video.srcObject = stream;
+                        overlay.classList.add('hidden');
+                        initCameraList();
+                        socket.emit('start_slr');
+                        frameInterval = setInterval(() => {
+                            if (!isInputActive) return;
+                            sendFrame(video);
+                        }, 100);
+                    })
+                    .catch(e => {
+                        addLog('Camera access denied: ' + e.message, 'error');
+                        stopAllInputs();
+                    });
+                return;
+            }
             addLog('Camera access denied: ' + err.message, 'error');
             stopAllInputs();
         });

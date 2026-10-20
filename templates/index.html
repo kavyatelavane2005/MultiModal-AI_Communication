@@ -172,6 +172,9 @@
                 <div class="panel-header">
                     <h2>Input</h2>
                     <div class="panel-controls">
+                        <select id="cameraSelect" class="camera-select" onchange="switchCameraDevice(this.value)" title="Choose camera (e.g. Laptop Webcam)">
+                            <option value="">Default Camera</option>
+                        </select>
                         <button class="ctrl-btn" id="btnToggle" onclick="toggleInput()">
                             <span id="toggleIcon">&#9654;</span>
                             <span id="toggleText">Start</span>

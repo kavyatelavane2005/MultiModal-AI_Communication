@@ -494,7 +494,33 @@ body::before {
 
 .panel-controls {
     display: flex;
+    align-items: center;
     gap: 8px;
+}
+
+.camera-select {
+    padding: 7px 12px;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-glass);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 12px;
+    max-width: 170px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.camera-select:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+}
+
+.camera-select option {
+    background: #111827;
+    color: #f1f5f9;
 }
 
 /* Control Buttons */
