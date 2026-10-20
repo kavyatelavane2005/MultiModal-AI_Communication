@@ -130,7 +130,7 @@
             <div class="setup-apikey">
                 <label>OpenRouter API Key (optional — for LLM translation)</label>
                 <div class="apikey-row">
-                    <input type="password" id="setupApiKey" placeholder="Enter your API key...">
+                    <input type="password" id="setupApiKey" placeholder="Enter your API key..." autocomplete="new-password" spellcheck="false">
                 </div>
             </div>
 
@@ -154,7 +154,7 @@
             </div>
             <div class="session-actions">
                 <div class="session-apikey-mini">
-                    <input type="password" id="commApiKey" placeholder="API Key..." title="OpenRouter API Key for LLM">
+                    <input type="password" id="commApiKey" placeholder="API Key..." autocomplete="new-password" spellcheck="false" title="OpenRouter API Key for LLM">
                     <button class="ctrl-btn secondary sm" onclick="saveCommApiKey()">Save Key</button>
                 </div>
                 <button class="ctrl-btn secondary" id="btnSwapRoles" onclick="swapRoles()" title="Swap sender and receiver for reply turn">

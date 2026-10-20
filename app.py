@@ -388,24 +388,30 @@ def run_message_processing(raw_text, source, glosses=None):
     """
     global session, output_router
 
-    # Step 1: LLM Processing
-    processed_text = raw_text  # Default: pass through
+    # Step 1: LLM Processing (with safe fallback)
+    fallback = raw_text.title() if source == 'sign' else raw_text
+    processed_text = fallback
 
     if translator and translator.api_key:
         try:
             if source == 'sign':
-                # Sign glosses need ASL→English translation
-                processed_text = translator.translate(glosses or raw_text.split())
+                candidate = translator.translate(glosses or raw_text.split())
             else:
-                # Speech/text may still need grammar/cleanup
-                processed_text = translator.translate_general(raw_text)
+                candidate = translator.translate_general(raw_text)
+
+            if candidate and not candidate.startswith("Translation error:") and not candidate.startswith("Error:"):
+                processed_text = candidate
+            else:
+                print(f"[LLM] Skipping invalid translation '{candidate}', using fallback '{fallback}'")
+                socketio.emit('system_message', {
+                    'text': 'LLM translation unavailable (check API key); displaying detected words directly.',
+                    'type': 'info'
+                })
         except Exception as e:
             print(f"LLM processing error: {e}")
-            processed_text = raw_text
+            processed_text = fallback
     else:
-        # No API key — for sign input, just join glosses
-        if source == 'sign':
-            processed_text = raw_text.title()
+        processed_text = fallback
 
     # Step 2: Output Routing
     if output_router:

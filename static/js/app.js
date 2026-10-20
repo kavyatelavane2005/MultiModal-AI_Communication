@@ -32,6 +32,8 @@ let availableInputs = ['sign', 'speech', 'text'];
 let outputModes = ['text', 'tts', 'avatar'];
 
 let selectedCameraId = localStorage.getItem('preferredCameraId') || null;
+let isSendingFrame = false;
+let offscreenCanvas = null;
 
 // ================================================================
 //  Initialize
@@ -75,6 +77,7 @@ function initSocket() {
 
     // SLR events
     socket.on('landmarks', (data) => {
+        isSendingFrame = false;
         drawLandmarks(data);
     });
 
@@ -452,6 +455,8 @@ function startSLR() {
 }
 
 function stopSLR() {
+    isSendingFrame = false;
+
     if (frameInterval) {
         clearInterval(frameInterval);
         frameInterval = null;
@@ -476,13 +481,28 @@ function stopSLR() {
 }
 
 function sendFrame(video) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 480;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Drop frame if server is still processing the previous one (eliminates lag accumulation)
+    if (isSendingFrame) return;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
 
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+    // Reuse a single offscreen canvas (prevents GC churn lag)
+    if (!offscreenCanvas) {
+        offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = 480;
+        offscreenCanvas.height = 360;
+    }
+
+    const ctx = offscreenCanvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, 480, 360);
+
+    isSendingFrame = true;
+
+    // Safety timeout: unlock if network packet was dropped
+    setTimeout(() => {
+        isSendingFrame = false;
+    }, 150);
+
+    const dataUrl = offscreenCanvas.toDataURL('image/jpeg', 0.5);
     socket.emit('video_frame', { image: dataUrl });
 }
 

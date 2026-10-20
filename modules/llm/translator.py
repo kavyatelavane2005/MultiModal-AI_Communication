@@ -86,11 +86,13 @@ class ASLTranslator:
         Returns:
             str: Translated English sentence.
         """
-        if not self.api_key:
-            return "Error: Groq API key not configured."
-            
         if not words_list:
             return ""
+
+        fallback_text = " ".join(words_list).title()
+
+        if not self.api_key:
+            return fallback_text
 
         input_text = " ".join(words_list)
         
@@ -107,7 +109,8 @@ class ASLTranslator:
             response_text = self._make_request(payload)
             return response_text.strip()
         except Exception as e:
-            return f"Translation error: {str(e)}"
+            print(f"[LLM Translator] API call failed: {e}. Using raw glosses fallback.")
+            return fallback_text
 
     def translate_general(self, text):
         """Process general text (speech/keyboard) through LLM for cleanup.
@@ -118,11 +121,11 @@ class ASLTranslator:
         Returns:
             str: Cleaned/corrected English sentence.
         """
-        if not self.api_key:
-            return text  # Pass through if no API key
-            
         if not text or not text.strip():
             return ""
+
+        if not self.api_key:
+            return text  # Pass through if no API key
 
         payload = {
             "model": self.text_model,
@@ -137,7 +140,8 @@ class ASLTranslator:
             response_text = self._make_request(payload)
             return response_text.strip()
         except Exception as e:
-            return text  # Return original on error
+            print(f"[LLM Translator] General text API call failed: {e}. Using original text.")
+            return text
 
     def refine_with_image(self, image_b64, top5_predictions):
         """Use Groq Vision to refine skeleton model predictions.
