@@ -49,12 +49,14 @@ class PoseEstimator:
 
         base_options = BaseOptions(model_asset_path=model_path)
 
+        # Lower hand confidence (0.3) to keep tracking hands even when
+        # partially visible while sitting close to the camera.
         options = HolisticLandmarkerOptions(
             base_options=base_options,
             running_mode=RunningMode.VIDEO,
             min_pose_detection_confidence=min_detection_confidence,
             min_pose_landmarks_confidence=min_detection_confidence,
-            min_hand_landmarks_confidence=min_detection_confidence,
+            min_hand_landmarks_confidence=0.3,
         )
 
         self.landmarker = HolisticLandmarker.create_from_options(options)

@@ -25,99 +25,272 @@
         </div>
     </nav>
 
-    <!-- Mode Selector -->
-    <div class="mode-selector">
-        <button class="mode-btn active" id="btnSLR" onclick="switchMode('slr')">
-            <span class="mode-icon">&#9995;</span>
-            <span>Sign Language</span>
-        </button>
-        <button class="mode-btn" id="btnSTT" onclick="switchMode('stt')">
-            <span class="mode-icon">&#127908;</span>
-            <span>Speech to Text</span>
-        </button>
-        <button class="mode-btn" id="btnTTS" onclick="switchMode('tts')">
-            <span class="mode-icon">&#128264;</span>
-            <span>Text to Speech</span>
-        </button>
-    </div>
-
-    <!-- Main Content -->
-    <div class="main-container">
-
-        <!-- Left Panel: Video / Input -->
-        <div class="panel video-panel">
-            <div class="panel-header">
-                <h2 id="inputPanelTitle">Camera Feed</h2>
-                <div class="panel-controls">
-                    <button class="ctrl-btn" id="btnToggle" onclick="toggleActive()">
-                        <span id="toggleIcon">&#9654;</span>
-                        <span id="toggleText">Start</span>
-                    </button>
-                    <button class="ctrl-btn secondary" id="btnReset" onclick="resetBuffer()">Reset</button>
-                </div>
+    <!-- ============================================================ -->
+    <!--  SCREEN 1: Session Setup                                      -->
+    <!-- ============================================================ -->
+    <div id="setupScreen" class="setup-screen">
+        <div class="setup-container">
+            <div class="setup-header">
+                <h2>Start Communication Session</h2>
+                <p>Select the roles for both users to configure input & output modalities</p>
             </div>
 
-            <!-- SLR: Camera View -->
-            <div class="video-container" id="slrView">
-                <video id="webcam" autoplay playsinline muted></video>
-                <canvas id="overlayCanvas"></canvas>
-                <div class="video-overlay" id="videoOverlay">
-                    <span>Click Start to begin</span>
+            <div class="setup-grid">
+                <!-- User A (Sender) -->
+                <div class="role-card">
+                    <div class="role-card-header sender">
+                        <span class="role-icon">🗣️</span>
+                        <h3>User A — Sender</h3>
+                        <p>Who is sending the message?</p>
+                    </div>
+                    <div class="role-options">
+                        <label class="role-option">
+                            <input type="radio" name="userA" value="deaf">
+                            <div class="role-label">
+                                <span class="role-emoji">🤟</span>
+                                <span>Deaf</span>
+                                <span class="role-desc">Sign language + Text</span>
+                            </div>
+                        </label>
+                        <label class="role-option">
+                            <input type="radio" name="userA" value="blind">
+                            <div class="role-label">
+                                <span class="role-emoji">👁️</span>
+                                <span>Blind</span>
+                                <span class="role-desc">Speech + Text</span>
+                            </div>
+                        </label>
+                        <label class="role-option">
+                            <input type="radio" name="userA" value="mute">
+                            <div class="role-label">
+                                <span class="role-emoji">🤐</span>
+                                <span>Mute</span>
+                                <span class="role-desc">Sign language + Text</span>
+                            </div>
+                        </label>
+                        <label class="role-option">
+                            <input type="radio" name="userA" value="normal" checked>
+                            <div class="role-label">
+                                <span class="role-emoji">👤</span>
+                                <span>Normal</span>
+                                <span class="role-desc">All inputs available</span>
+                            </div>
+                        </label>
+                    </div>
                 </div>
-                <!-- Buffer Bar -->
-                <div class="buffer-bar-container">
-                    <div class="buffer-bar" id="bufferBar"></div>
-                    <span class="buffer-text" id="bufferText">Buffer: 0%</span>
-                </div>
-            </div>
 
-            <!-- STT: Microphone View -->
-            <div class="mic-container hidden" id="sttView">
-                <div class="mic-circle" id="micCircle">
-                    <div class="mic-icon">&#127908;</div>
-                    <div class="mic-waves" id="micWaves"></div>
-                </div>
-                <p class="mic-status" id="micStatus">Click Start to listen</p>
-            </div>
+                <!-- Arrow -->
+                <div class="setup-arrow">→</div>
 
-            <!-- TTS: Text Input View -->
-            <div class="tts-container hidden" id="ttsView">
-                <textarea id="ttsInput" placeholder="Type text here to speak it aloud..." rows="6"></textarea>
-                <div class="tts-controls">
-                    <select id="voiceSelect"></select>
-                    <div class="tts-sliders">
-                        <label>Speed: <input type="range" id="ttsRate" min="0.5" max="2" step="0.1" value="1"><span id="rateVal">1.0</span></label>
-                        <label>Pitch: <input type="range" id="ttsPitch" min="0" max="2" step="0.1" value="1"><span id="pitchVal">1.0</span></label>
+                <!-- User B (Receiver) -->
+                <div class="role-card">
+                    <div class="role-card-header receiver">
+                        <span class="role-icon">👂</span>
+                        <h3>User B — Receiver</h3>
+                        <p>Who is receiving the message?</p>
+                    </div>
+                    <div class="role-options">
+                        <label class="role-option">
+                            <input type="radio" name="userB" value="deaf">
+                            <div class="role-label">
+                                <span class="role-emoji">🤟</span>
+                                <span>Deaf</span>
+                                <span class="role-desc">Text + Sign avatar</span>
+                            </div>
+                        </label>
+                        <label class="role-option">
+                            <input type="radio" name="userB" value="blind">
+                            <div class="role-label">
+                                <span class="role-emoji">👁️</span>
+                                <span>Blind</span>
+                                <span class="role-desc">Voice TTS only</span>
+                            </div>
+                        </label>
+                        <label class="role-option">
+                            <input type="radio" name="userB" value="mute">
+                            <div class="role-label">
+                                <span class="role-emoji">🤐</span>
+                                <span>Mute</span>
+                                <span class="role-desc">Text + Voice</span>
+                            </div>
+                        </label>
+                        <label class="role-option">
+                            <input type="radio" name="userB" value="normal" checked>
+                            <div class="role-label">
+                                <span class="role-emoji">👤</span>
+                                <span>Normal</span>
+                                <span class="role-desc">All outputs</span>
+                            </div>
+                        </label>
                     </div>
                 </div>
             </div>
+
+            <!-- API Key -->
+            <div class="setup-apikey">
+                <label>OpenRouter API Key (optional — for LLM translation)</label>
+                <div class="apikey-row">
+                    <input type="password" id="setupApiKey" placeholder="Enter your API key...">
+                </div>
+            </div>
+
+            <button class="start-session-btn" onclick="startSession()">
+                <span>Start Session</span>
+                <span class="btn-arrow">→</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!--  SCREEN 2: Main Communication Interface                       -->
+    <!-- ============================================================ -->
+    <div id="commScreen" class="comm-screen hidden">
+
+        <!-- Session Info Bar -->
+        <div class="session-bar">
+            <div class="session-info">
+                <span class="session-label" id="sessionLabel">Normal → Normal</span>
+                <span class="session-badge" id="sessionBadge">Active</span>
+            </div>
+            <div class="session-actions">
+                <div class="session-apikey-mini">
+                    <input type="password" id="commApiKey" placeholder="API Key..." title="OpenRouter API Key for LLM">
+                    <button class="ctrl-btn secondary sm" onclick="saveCommApiKey()">Save Key</button>
+                </div>
+                <button class="ctrl-btn secondary" id="btnSwapRoles" onclick="swapRoles()" title="Swap sender and receiver for reply turn">
+                    <span>⇄</span> Swap Roles / Reply
+                </button>
+                <button class="ctrl-btn secondary danger" onclick="endSession()">End Session</button>
+            </div>
         </div>
 
-        <!-- Right Panel: Output / Conversation -->
-        <div class="panel output-panel">
-            <div class="panel-header">
-                <h2>Output</h2>
-                <button class="ctrl-btn secondary" onclick="clearOutput()">Clear</button>
+        <!-- Main Content Grid -->
+        <div class="main-container">
+
+            <!-- ======== LEFT: Input Panel ======== -->
+            <div class="panel input-panel">
+                <div class="panel-header">
+                    <h2>Input</h2>
+                    <div class="panel-controls">
+                        <button class="ctrl-btn" id="btnToggle" onclick="toggleInput()">
+                            <span id="toggleIcon">&#9654;</span>
+                            <span id="toggleText">Start</span>
+                        </button>
+                        <button class="ctrl-btn secondary hidden" id="btnReset" onclick="resetBuffer()">Reset</button>
+                    </div>
+                </div>
+
+                <!-- Input Mode Tabs -->
+                <div class="input-tabs" id="inputTabs">
+                    <button class="input-tab active" data-mode="sign" onclick="switchInputMode('sign')">
+                        <span>🤟</span> Sign Language
+                    </button>
+                    <button class="input-tab" data-mode="speech" onclick="switchInputMode('speech')">
+                        <span>🎤</span> Speech
+                    </button>
+                    <button class="input-tab" data-mode="text" onclick="switchInputMode('text')">
+                        <span>⌨️</span> Text
+                    </button>
+                </div>
+
+                <!-- Sign Language Input -->
+                <div class="input-view" id="signView">
+                    <div class="video-container">
+                        <video id="webcam" autoplay playsinline muted></video>
+                        <canvas id="overlayCanvas"></canvas>
+                        <div class="video-overlay" id="videoOverlay">
+                            <span>Click Start to begin sign recognition</span>
+                        </div>
+                        <div class="buffer-bar-container">
+                            <div class="buffer-bar" id="bufferBar"></div>
+                            <span class="buffer-text" id="bufferText">Buffer: 0%</span>
+                        </div>
+                    </div>
+                    <!-- Current detection -->
+                    <div class="detection-strip">
+                        <div class="detection-info">
+                            <span class="detection-label">Detected:</span>
+                            <span class="detection-word" id="detectedSign">---</span>
+                            <span class="detection-conf" id="detectedConf"></span>
+                        </div>
+                        <div class="top5-mini" id="top5Mini"></div>
+                    </div>
+                </div>
+
+                <!-- Speech Input -->
+                <div class="input-view hidden" id="speechView">
+                    <div class="mic-container">
+                        <div class="mic-circle" id="micCircle">
+                            <div class="mic-icon">🎤</div>
+                        </div>
+                        <p class="mic-status" id="micStatus">Click Start to listen</p>
+                        <div class="speech-transcript" id="speechTranscript">
+                            <p class="transcript-placeholder">Speech will appear here...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Text Input -->
+                <div class="input-view hidden" id="textView">
+                    <div class="text-input-container">
+                        <textarea id="textInput" placeholder="Type your message here..." rows="5"></textarea>
+                        <button class="send-btn" onclick="sendTextMessage()">
+                            <span>Send Message</span>
+                            <span>→</span>
+                        </button>
+                    </div>
+                </div>
             </div>
 
-            <!-- Current Prediction Display -->
-            <div class="prediction-display" id="predictionDisplay">
-                <div class="prediction-label">Detected Sign</div>
-                <div class="prediction-word" id="predictionWord">---</div>
-                <div class="prediction-confidence" id="predictionConf">Waiting...</div>
-            </div>
+            <!-- ======== RIGHT: Output Panel ======== -->
+            <div class="panel output-panel">
+                <div class="panel-header">
+                    <h2>Output — <span id="outputTarget">User B</span></h2>
+                    <div class="output-badges" id="outputBadges">
+                        <!-- Filled dynamically -->
+                    </div>
+                </div>
 
-            <!-- Top-5 Predictions -->
-            <div class="top5-container" id="top5Container">
-                <h3>Top Predictions</h3>
-                <div id="top5List"></div>
-            </div>
+                <!-- Conversation Messages -->
+                <div class="conversation-area" id="conversationArea">
+                    <div class="conv-welcome">
+                        <div class="conv-welcome-icon">💬</div>
+                        <p>Messages will appear here</p>
+                        <p class="conv-welcome-sub">Send a message using the input panel</p>
+                    </div>
+                </div>
 
-            <!-- Conversation Log -->
-            <div class="conversation-log" id="conversationLog">
-                <div class="log-entry system">
-                    <span class="log-time"></span>
-                    <span class="log-text">System ready. Select a mode and click Start.</span>
+                <!-- Sign Avatar Display (shown for deaf receiver) -->
+                <div class="avatar-panel hidden" id="avatarPanel">
+                    <div class="avatar-header">
+                        <span class="avatar-dot"></span>
+                        <h3>Sign Avatar</h3>
+                    </div>
+                    <div class="avatar-display" id="avatarDisplay">
+                        <canvas id="avatarCanvas" width="280" height="200"></canvas>
+                        <div class="avatar-gloss" id="avatarGloss">---</div>
+                    </div>
+                </div>
+
+                <!-- TTS Indicator (shown when TTS is active) -->
+                <div class="tts-indicator hidden" id="ttsIndicator">
+                    <div class="tts-wave">
+                        <span></span><span></span><span></span><span></span><span></span>
+                    </div>
+                    <span class="tts-label">Speaking...</span>
+                </div>
+
+                <!-- Continue / Swap / End -->
+                <div class="session-controls">
+                    <button class="ctrl-btn" onclick="continueSession()">
+                        <span>↻</span> Continue
+                    </button>
+                    <button class="ctrl-btn secondary" onclick="swapRoles()">
+                        <span>⇄</span> Reply (Swap Roles)
+                    </button>
+                    <button class="ctrl-btn secondary danger" onclick="endSession()">
+                        End Session
+                    </button>
                 </div>
             </div>
         </div>

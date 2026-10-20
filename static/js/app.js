@@ -1,26 +1,47 @@
 /**
  * MultiModal Bridge — Client-Side Application
- * Handles webcam streaming, Web Speech API, and SocketIO communication.
+ *
+ * Implements the full communication workflow:
+ *   1. Session setup (role selection)
+ *   2. Input acquisition (sign / speech / text)
+ *   3. Message processing (via server + LLM)
+ *   4. Output routing (text / TTS / avatar)
+ *   5. Session loop (continue / end)
  */
 
-// ---- State ----
-let currentMode = 'slr';
-let isActive = false;
+// ================================================================
+//  State
+// ================================================================
+
 let socket = null;
+let sessionActive = false;
+let currentInputMode = 'sign';
+let isInputActive = false;
+
+// SLR state
 let webcamStream = null;
 let frameInterval = null;
-let recognition = null; // Web Speech API
 
-// ---- Initialize ----
+// STT state
+let recognition = null;
+
+// Session config
+let userARole = 'normal';
+let userBRole = 'normal';
+let availableInputs = ['sign', 'speech', 'text'];
+let outputModes = ['text', 'tts', 'avatar'];
+
+// ================================================================
+//  Initialize
+// ================================================================
+
 document.addEventListener('DOMContentLoaded', () => {
     initSocket();
-    initTTSVoices();
-    initSliders();
 });
 
-// ============================================================
+// ================================================================
 //  Socket.IO Connection
-// ============================================================
+// ================================================================
 
 function initSocket() {
     socket = io();
@@ -28,25 +49,28 @@ function initSocket() {
     socket.on('connect', () => {
         document.getElementById('connectionDot').classList.add('connected');
         document.getElementById('connectionText').textContent = 'Connected';
-        addLog('Connected to server', 'system');
     });
 
     socket.on('disconnect', () => {
         document.getElementById('connectionDot').classList.remove('connected');
         document.getElementById('connectionText').textContent = 'Disconnected';
-        addLog('Disconnected from server', 'system');
-        stopAll();
+        stopAllInputs();
     });
 
     socket.on('system_message', (data) => {
-        addLog(data.text, 'system');
+        addLog(data.text, data.type || 'info');
+    });
+
+    // Session events
+    socket.on('session_started', (data) => {
+        onSessionStarted(data);
+    });
+
+    socket.on('session_ended', () => {
+        onSessionEnded();
     });
 
     // SLR events
-    socket.on('slr_prediction', (data) => {
-        showPrediction(data);
-    });
-
     socket.on('landmarks', (data) => {
         drawLandmarks(data);
     });
@@ -55,88 +79,245 @@ function initSocket() {
         updateBufferBar(data.fill);
     });
 
+    socket.on('slr_prediction', (data) => {
+        showDetection(data);
+    });
+
     socket.on('slr_status', (data) => {
         if (!data.active) {
-            addLog('Sign recognition stopped', 'system');
+            addLog('Sign recognition stopped', 'info');
         }
+    });
+
+    // Message processing result
+    socket.on('message_processed', (data) => {
+        handleProcessedMessage(data);
     });
 }
 
-// ============================================================
-//  Mode Switching
-// ============================================================
+// ================================================================
+//  Session Management
+// ================================================================
 
-function switchMode(mode) {
-    if (isActive) stopAll();
+function startSession() {
+    const userA = document.querySelector('input[name="userA"]:checked');
+    const userB = document.querySelector('input[name="userB"]:checked');
 
-    currentMode = mode;
+    if (!userA || !userB) {
+        alert('Please select roles for both users');
+        return;
+    }
 
-    // Update mode buttons
-    document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
-    document.getElementById('btn' + mode.toUpperCase()).classList.add('active');
+    userARole = userA.value;
+    userBRole = userB.value;
 
-    // Show/hide views
-    document.getElementById('slrView').classList.toggle('hidden', mode !== 'slr');
-    document.getElementById('sttView').classList.toggle('hidden', mode !== 'stt');
-    document.getElementById('ttsView').classList.toggle('hidden', mode !== 'tts');
+    // Set API key if provided
+    const apiKey = document.getElementById('setupApiKey').value.trim();
+    if (apiKey) {
+        // Wait for connection if needed
+        if (socket && socket.connected) {
+            socket.emit('set_api_key', { api_key: apiKey });
+        }
+    }
 
-    // Update panel title
-    const titles = { slr: 'Camera Feed', stt: 'Microphone', tts: 'Text Input' };
-    document.getElementById('inputPanelTitle').textContent = titles[mode];
-
-    // Update toggle button
-    document.getElementById('toggleText').textContent = 'Start';
-    document.getElementById('toggleIcon').textContent = '\u25B6';
-
-    // Update prediction display labels
-    const labels = { slr: 'Detected Sign', stt: 'Recognized Speech', tts: 'Speaking' };
-    document.querySelector('.prediction-label').textContent = labels[mode];
-    document.getElementById('predictionWord').textContent = '---';
-    document.getElementById('predictionConf').textContent = 'Waiting...';
-
-    // Show/hide reset button (only for SLR)
-    document.getElementById('btnReset').classList.toggle('hidden', mode !== 'slr');
+    socket.emit('start_session', {
+        user_a_role: userARole,
+        user_b_role: userBRole
+    });
 }
 
-// ============================================================
-//  Toggle Active (Start/Stop)
-// ============================================================
+function onSessionStarted(data) {
+    sessionActive = true;
+    availableInputs = data.available_inputs;
+    outputModes = data.output_modes;
 
-function toggleActive() {
-    if (isActive) {
-        stopAll();
-    } else {
-        startCurrent();
+    // Update session label
+    const roleLabels = { deaf: '🤟 Deaf', blind: '👁️ Blind', mute: '🤐 Mute', normal: '👤 Normal' };
+    document.getElementById('sessionLabel').textContent =
+        (roleLabels[data.user_a_role] || data.user_a_role) + ' → ' +
+        (roleLabels[data.user_b_role] || data.user_b_role);
+    document.getElementById('sessionBadge').textContent = 'Active';
+
+    // Configure input tabs
+    configureInputTabs(availableInputs);
+
+    // Configure output badges
+    configureOutputBadges(outputModes);
+
+    // Show/hide avatar panel
+    const avatarPanel = document.getElementById('avatarPanel');
+    avatarPanel.classList.toggle('hidden', !outputModes.includes('avatar'));
+
+    // Show output target
+    document.getElementById('outputTarget').textContent =
+        'User B (' + data.user_b_role.charAt(0).toUpperCase() + data.user_b_role.slice(1) + ')';
+
+    // Switch screens
+    document.getElementById('setupScreen').classList.add('hidden');
+    document.getElementById('commScreen').classList.remove('hidden');
+
+    // Select first available input mode
+    if (availableInputs.length > 0) {
+        switchInputMode(availableInputs[0]);
+    }
+
+    addLog('Session started', 'success');
+}
+
+function swapRoles() {
+    stopAllInputs();
+    if (socket && socket.connected) {
+        socket.emit('swap_roles');
     }
 }
 
-function startCurrent() {
-    isActive = true;
+function saveCommApiKey() {
+    const input = document.getElementById('commApiKey');
+    if (!input) return;
+    const key = input.value.trim();
+    if (key) {
+        if (socket && socket.connected) {
+            socket.emit('set_api_key', { api_key: key });
+            input.value = '';
+            input.placeholder = 'Saved ✓';
+            addLog('OpenRouter API Key updated successfully', 'success');
+        }
+    } else {
+        addLog('Please enter a valid API key', 'error');
+    }
+}
+
+function endSession() {
+    stopAllInputs();
+
+    if (socket && socket.connected) {
+        socket.emit('end_session');
+    }
+}
+
+function onSessionEnded() {
+    sessionActive = false;
+    stopAllInputs();
+
+    // Switch screens
+    document.getElementById('commScreen').classList.add('hidden');
+    document.getElementById('setupScreen').classList.remove('hidden');
+
+    // Clear conversation
+    const area = document.getElementById('conversationArea');
+    area.innerHTML = `
+        <div class="conv-welcome">
+            <div class="conv-welcome-icon">💬</div>
+            <p>Messages will appear here</p>
+            <p class="conv-welcome-sub">Send a message using the input panel</p>
+        </div>
+    `;
+}
+
+function continueSession() {
+    resetBuffer();
+    addLog('Ready for next message', 'info');
+    if (currentInputMode === 'text') {
+        const input = document.getElementById('textInput');
+        if (input) input.focus();
+    }
+}
+
+// ================================================================
+//  Input Tab Configuration
+// ================================================================
+
+function configureInputTabs(inputs) {
+    const tabs = document.querySelectorAll('.input-tab');
+    tabs.forEach(tab => {
+        const mode = tab.dataset.mode;
+        if (inputs.includes(mode)) {
+            tab.classList.remove('hidden');
+        } else {
+            tab.classList.add('hidden');
+        }
+    });
+
+    // Show/hide reset button (only for sign)
+    document.getElementById('btnReset').classList.toggle('hidden', !inputs.includes('sign'));
+}
+
+function configureOutputBadges(modes) {
+    const container = document.getElementById('outputBadges');
+    const labels = { text: '📝 Text', tts: '🔊 Voice', avatar: '🤟 Avatar' };
+    container.innerHTML = modes.map(m =>
+        `<span class="output-badge">${labels[m] || m}</span>`
+    ).join('');
+}
+
+// ================================================================
+//  Input Mode Switching
+// ================================================================
+
+function switchInputMode(mode) {
+    if (isInputActive) stopAllInputs();
+
+    currentInputMode = mode;
+
+    // Update tabs
+    document.querySelectorAll('.input-tab').forEach(t => t.classList.remove('active'));
+    const activeTab = document.querySelector(`.input-tab[data-mode="${mode}"]`);
+    if (activeTab) activeTab.classList.add('active');
+
+    // Show/hide views
+    document.getElementById('signView').classList.toggle('hidden', mode !== 'sign');
+    document.getElementById('speechView').classList.toggle('hidden', mode !== 'speech');
+    document.getElementById('textView').classList.toggle('hidden', mode !== 'text');
+
+    // Update toggle button visibility
+    const toggleBtn = document.getElementById('btnToggle');
+    const resetBtn = document.getElementById('btnReset');
+    toggleBtn.classList.toggle('hidden', mode === 'text');
+    resetBtn.classList.toggle('hidden', mode !== 'sign');
+
+    // Reset toggle state
+    document.getElementById('toggleText').textContent = 'Start';
+    document.getElementById('toggleIcon').textContent = '\u25B6';
+    document.getElementById('btnToggle').classList.remove('active');
+}
+
+// ================================================================
+//  Input Toggle (Start/Stop)
+// ================================================================
+
+function toggleInput() {
+    if (isInputActive) {
+        stopAllInputs();
+    } else {
+        startCurrentInput();
+    }
+}
+
+function startCurrentInput() {
+    isInputActive = true;
     document.getElementById('toggleText').textContent = 'Stop';
     document.getElementById('toggleIcon').textContent = '\u23F9';
     document.getElementById('btnToggle').classList.add('active');
 
-    switch (currentMode) {
-        case 'slr': startSLR(); break;
-        case 'stt': startSTT(); break;
-        case 'tts': startTTS(); break;
+    switch (currentInputMode) {
+        case 'sign': startSLR(); break;
+        case 'speech': startSTT(); break;
     }
 }
 
-function stopAll() {
-    isActive = false;
+function stopAllInputs() {
+    isInputActive = false;
     document.getElementById('toggleText').textContent = 'Start';
     document.getElementById('toggleIcon').textContent = '\u25B6';
     document.getElementById('btnToggle').classList.remove('active');
 
     stopSLR();
     stopSTT();
-    stopTTSSpeaking();
 }
 
-// ============================================================
+// ================================================================
 //  SLR — Sign Language Recognition
-// ============================================================
+// ================================================================
 
 function startSLR() {
     const video = document.getElementById('webcam');
@@ -149,17 +330,16 @@ function startSLR() {
             overlay.classList.add('hidden');
 
             socket.emit('start_slr');
-            addLog('Sign language recognition started', 'system');
+            addLog('Sign language recognition started', 'success');
 
-            // Send frames at ~10 FPS
             frameInterval = setInterval(() => {
-                if (!isActive) return;
+                if (!isInputActive) return;
                 sendFrame(video);
             }, 100);
         })
         .catch(err => {
-            addLog('Camera access denied: ' + err.message, 'system');
-            stopAll();
+            addLog('Camera access denied: ' + err.message, 'error');
+            stopAllInputs();
         });
 }
 
@@ -175,9 +355,11 @@ function stopSLR() {
     }
 
     const video = document.getElementById('webcam');
-    video.srcObject = null;
+    if (video) video.srcObject = null;
 
-    document.getElementById('videoOverlay').classList.remove('hidden');
+    const overlay = document.getElementById('videoOverlay');
+    if (overlay) overlay.classList.remove('hidden');
+
     clearCanvas();
 
     if (socket && socket.connected) {
@@ -190,10 +372,6 @@ function sendFrame(video) {
     canvas.width = 640;
     canvas.height = 480;
     const ctx = canvas.getContext('2d');
-
-    // Mirror the frame to match what user sees
-    ctx.translate(canvas.width, 0);
-    ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
@@ -203,6 +381,7 @@ function sendFrame(video) {
 function drawLandmarks(data) {
     const canvas = document.getElementById('overlayCanvas');
     const video = document.getElementById('webcam');
+    if (!canvas || !video) return;
 
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 480;
@@ -210,7 +389,6 @@ function drawLandmarks(data) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Mirror the canvas to match mirrored video
     ctx.save();
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
@@ -232,7 +410,6 @@ function drawLandmarks(data) {
                 ctx.stroke();
             }
         });
-
         body.forEach((pt, i) => {
             if (i <= 24) {
                 ctx.fillStyle = 'rgba(0, 200, 255, 0.9)';
@@ -279,63 +456,47 @@ function drawLandmarks(data) {
 
 function clearCanvas() {
     const canvas = document.getElementById('overlayCanvas');
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
 }
 
 function updateBufferBar(fill) {
     const pct = Math.round(fill * 100);
-    document.getElementById('bufferBar').style.width = pct + '%';
-    document.getElementById('bufferText').textContent = 'Buffer: ' + pct + '%';
+    const bar = document.getElementById('bufferBar');
+    const text = document.getElementById('bufferText');
+    if (bar) bar.style.width = pct + '%';
+    if (text) text.textContent = 'Buffer: ' + pct + '%';
+}
+
+function showDetection(data) {
+    document.getElementById('detectedSign').textContent = data.gloss.toUpperCase();
+    document.getElementById('detectedConf').textContent = data.confidence + '%';
+
+    // Mini top-5
+    let html = '';
+    data.top5.forEach((item, i) => {
+        html += `<span class="top5-chip ${i === 0 ? 'top' : ''}">${item.gloss} ${item.confidence}%</span>`;
+    });
+    document.getElementById('top5Mini').innerHTML = html;
 }
 
 function resetBuffer() {
     socket.emit('reset_buffer');
-    document.getElementById('predictionWord').textContent = '---';
-    document.getElementById('predictionConf').textContent = 'Buffer reset';
-    document.getElementById('top5List').innerHTML = '';
+    document.getElementById('detectedSign').textContent = '---';
+    document.getElementById('detectedConf').textContent = '';
+    document.getElementById('top5Mini').innerHTML = '';
 }
 
-// ============================================================
-//  SLR Prediction Display
-// ============================================================
-
-function showPrediction(data) {
-    document.getElementById('predictionWord').textContent = data.gloss.toUpperCase();
-    document.getElementById('predictionConf').textContent = data.confidence + '% confidence';
-
-    // Top-5
-    let html = '';
-    data.top5.forEach((item, i) => {
-        const rankClass = i === 0 ? 'first' : '';
-        html += `
-            <div class="top5-item">
-                <div class="top5-rank ${rankClass}">${i + 1}</div>
-                <div class="top5-name">${item.gloss}</div>
-                <div class="top5-bar-bg">
-                    <div class="top5-bar-fill" style="width: ${item.confidence}%"></div>
-                </div>
-                <div class="top5-pct">${item.confidence}%</div>
-            </div>
-        `;
-    });
-    document.getElementById('top5List').innerHTML = html;
-
-    // Add to log (debounced — only if different from last)
-    if (!showPrediction._last || showPrediction._last !== data.gloss) {
-        addLog('[Sign] ' + data.gloss.toUpperCase() + ' (' + data.confidence + '%)', 'sign');
-        showPrediction._last = data.gloss;
-    }
-}
-
-// ============================================================
+// ================================================================
 //  STT — Speech to Text (Web Speech API)
-// ============================================================
+// ================================================================
 
 function startSTT() {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-        addLog('Speech recognition not supported in this browser. Use Chrome.', 'system');
-        stopAll();
+        addLog('Speech recognition not supported — use Chrome', 'error');
+        stopAllInputs();
         return;
     }
 
@@ -347,11 +508,12 @@ function startSTT() {
 
     const micCircle = document.getElementById('micCircle');
     const micStatus = document.getElementById('micStatus');
+    const transcript = document.getElementById('speechTranscript');
 
     recognition.onstart = () => {
         micCircle.classList.add('listening');
         micStatus.textContent = 'Listening...';
-        addLog('Speech recognition started', 'system');
+        addLog('Speech recognition started', 'success');
     };
 
     recognition.onresult = (event) => {
@@ -359,34 +521,34 @@ function startSTT() {
         let interimTranscript = '';
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
-            const transcript = event.results[i][0].transcript;
+            const t = event.results[i][0].transcript;
             if (event.results[i].isFinal) {
-                finalTranscript += transcript;
+                finalTranscript += t;
             } else {
-                interimTranscript += transcript;
+                interimTranscript += t;
             }
         }
 
+        // Show in transcript area
         if (finalTranscript) {
-            document.getElementById('predictionWord').textContent = finalTranscript;
-            document.getElementById('predictionConf').textContent = 'Final result';
+            transcript.innerHTML = `<p class="transcript-final">"${finalTranscript}"</p>`;
+            // Send to server
+            socket.emit('speech_input', { text: finalTranscript });
             addLog('[Speech] ' + finalTranscript, 'speech');
         } else if (interimTranscript) {
-            document.getElementById('predictionWord').textContent = interimTranscript;
-            document.getElementById('predictionConf').textContent = 'Listening...';
+            transcript.innerHTML = `<p class="transcript-interim">${interimTranscript}</p>`;
         }
     };
 
     recognition.onerror = (event) => {
         if (event.error !== 'no-speech') {
-            addLog('Speech error: ' + event.error, 'system');
+            addLog('Speech error: ' + event.error, 'error');
         }
     };
 
     recognition.onend = () => {
         micCircle.classList.remove('listening');
-        if (isActive && currentMode === 'stt') {
-            // Restart if still active
+        if (isInputActive && currentInputMode === 'speech') {
             try { recognition.start(); } catch(e) {}
         } else {
             micStatus.textContent = 'Click Start to listen';
@@ -407,94 +569,424 @@ function stopSTT() {
     if (micStatus) micStatus.textContent = 'Click Start to listen';
 }
 
-// ============================================================
-//  TTS — Text to Speech (Web Speech Synthesis)
-// ============================================================
+// ================================================================
+//  Text Input — Send Message
+// ================================================================
 
-function initTTSVoices() {
-    const select = document.getElementById('voiceSelect');
-    function populateVoices() {
-        const voices = speechSynthesis.getVoices();
-        select.innerHTML = '';
-        voices.forEach((voice, i) => {
-            const option = document.createElement('option');
-            option.value = i;
-            option.textContent = voice.name + ' (' + voice.lang + ')';
-            if (voice.default) option.selected = true;
-            select.appendChild(option);
-        });
-    }
-    populateVoices();
-    speechSynthesis.onvoiceschanged = populateVoices;
-}
+function sendTextMessage() {
+    const input = document.getElementById('textInput');
+    const text = input.value.trim();
 
-function initSliders() {
-    const rate = document.getElementById('ttsRate');
-    const pitch = document.getElementById('ttsPitch');
-    rate.oninput = () => document.getElementById('rateVal').textContent = parseFloat(rate.value).toFixed(1);
-    pitch.oninput = () => document.getElementById('pitchVal').textContent = parseFloat(pitch.value).toFixed(1);
-}
-
-function startTTS() {
-    const text = document.getElementById('ttsInput').value.trim();
     if (!text) {
-        addLog('Please enter some text to speak', 'system');
-        stopAll();
+        addLog('Please type a message', 'error');
         return;
     }
 
+    socket.emit('text_input', { text: text });
+    addLog('[Text] ' + text, 'text');
+    input.value = '';
+}
+
+// Allow Enter key to send (Shift+Enter for newline)
+document.addEventListener('keydown', (e) => {
+    if (e.target.id === 'textInput' && e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendTextMessage();
+    }
+});
+
+// ================================================================
+//  Message Processing — Handle Output
+// ================================================================
+
+function handleProcessedMessage(data) {
+    const { original_text, processed_text, source, outputs } = data;
+
+    // Remove welcome message if present
+    const welcome = document.querySelector('.conv-welcome');
+    if (welcome) welcome.remove();
+
+    const area = document.getElementById('conversationArea');
+
+    // Source label
+    const sourceLabels = { sign: '🤟 Sign', speech: '🎤 Speech', text: '⌨️ Text' };
+    const sourceLabel = sourceLabels[source] || source;
+
+    // Create message card
+    const msg = document.createElement('div');
+    msg.className = 'conv-message';
+    msg.innerHTML = `
+        <div class="conv-source">${sourceLabel}</div>
+        <div class="conv-original">${escapeHtml(original_text)}</div>
+        ${processed_text !== original_text
+            ? `<div class="conv-processed">
+                 <span class="conv-processed-label">✨ AI Processed:</span>
+                 ${escapeHtml(processed_text)}
+               </div>`
+            : ''
+        }
+        <div class="conv-outputs">
+            ${outputs.show_text ? '<span class="conv-out-badge text">📝 Text</span>' : ''}
+            ${outputs.speak_text ? '<span class="conv-out-badge tts">🔊 Spoken</span>' : ''}
+            ${outputs.show_avatar ? '<span class="conv-out-badge avatar">🤟 Signed</span>' : ''}
+        </div>
+    `;
+    area.appendChild(msg);
+    area.scrollTop = area.scrollHeight;
+
+    // TTS Output
+    if (outputs.speak_text && outputs.tts_text) {
+        speakText(outputs.tts_text);
+    }
+
+    // Avatar Output
+    if (outputs.show_avatar && outputs.avatar_glosses) {
+        showSignAvatar(outputs.avatar_glosses);
+    }
+}
+
+// ================================================================
+//  TTS — Text to Speech Output
+// ================================================================
+
+function speakText(text) {
+    if (!('speechSynthesis' in window)) {
+        addLog('TTS not supported in this browser', 'error');
+        return;
+    }
+
+    const indicator = document.getElementById('ttsIndicator');
+    indicator.classList.remove('hidden');
+
     const utterance = new SpeechSynthesisUtterance(text);
-    const voices = speechSynthesis.getVoices();
-    const voiceIndex = document.getElementById('voiceSelect').value;
-    if (voices[voiceIndex]) utterance.voice = voices[voiceIndex];
-
-    utterance.rate = parseFloat(document.getElementById('ttsRate').value);
-    utterance.pitch = parseFloat(document.getElementById('ttsPitch').value);
-
-    document.getElementById('predictionWord').textContent = text.substring(0, 30) + (text.length > 30 ? '...' : '');
-    document.getElementById('predictionConf').textContent = 'Speaking...';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
 
     utterance.onend = () => {
-        document.getElementById('predictionConf').textContent = 'Done';
-        stopAll();
+        indicator.classList.add('hidden');
+    };
+
+    utterance.onerror = () => {
+        indicator.classList.add('hidden');
     };
 
     speechSynthesis.speak(utterance);
-    addLog('[TTS] ' + text, 'tts');
 }
 
-function stopTTSSpeaking() {
-    speechSynthesis.cancel();
+// ================================================================
+//  Sign Avatar — Animated Signing Display
+// ================================================================
+
+// Global Avatar Animation State
+let avatarAnimFrame = null;
+let avatarGlossesQueue = [];
+let avatarCurrentIndex = 0;
+let avatarStartTime = 0;
+
+function showSignAvatar(glosses) {
+    const panel = document.getElementById('avatarPanel');
+    if (!glosses || glosses.length === 0) return;
+
+    panel.classList.remove('hidden');
+    avatarGlossesQueue = glosses;
+    avatarCurrentIndex = 0;
+    avatarStartTime = performance.now();
+
+    if (avatarAnimFrame) {
+        cancelAnimationFrame(avatarAnimFrame);
+    }
+
+    runAvatarAnimationLoop();
 }
 
-// ============================================================
+function runAvatarAnimationLoop() {
+    const canvas = document.getElementById('avatarCanvas');
+    const glossDisplay = document.getElementById('avatarGloss');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const durationPerGloss = 1800; // 1.8s per word animation
+    const now = performance.now();
+    const elapsed = now - avatarStartTime;
+
+    const currentGlossIdx = Math.floor(elapsed / durationPerGloss);
+
+    if (currentGlossIdx < avatarGlossesQueue.length) {
+        const currentGloss = avatarGlossesQueue[currentGlossIdx];
+        const progressInGloss = (elapsed % durationPerGloss) / durationPerGloss;
+
+        if (glossDisplay) {
+            glossDisplay.innerHTML = `<span class="gloss-word">${currentGloss.toUpperCase()}</span> <span class="gloss-counter">(${currentGlossIdx + 1}/${avatarGlossesQueue.length})</span>`;
+        }
+
+        renderAvatarFrame(ctx, canvas.width, canvas.height, currentGloss, progressInGloss);
+        avatarAnimFrame = requestAnimationFrame(runAvatarAnimationLoop);
+    } else {
+        // Animation completed — return to relaxed rest pose
+        const lastGloss = avatarGlossesQueue[avatarGlossesQueue.length - 1];
+        if (glossDisplay) {
+            glossDisplay.innerHTML = `<span class="gloss-word">${lastGloss.toUpperCase()}</span> <span class="gloss-done">✓ Done</span>`;
+        }
+        renderAvatarFrame(ctx, canvas.width, canvas.height, 'rest', 1.0);
+    }
+}
+
+// Keyframe pose generator for ASL gloss gestures
+function getAvatarJointAngles(gloss, t) {
+    // t ranges 0 to 1
+    // Smooth sinusoidal ease in and out:
+    const ease = Math.sin(t * Math.PI);
+
+    // Default rest pose (arms naturally relaxed at sides/waist)
+    let leftShoulder = 0.3;
+    let leftElbow = 0.5;
+    let rightShoulder = -0.3;
+    let rightElbow = -0.5;
+    let handGesture = 'open';
+
+    const g = gloss.toLowerCase();
+
+    if (g === 'drink' || g === 'water') {
+        // Right hand moves up to mouth with cup shape
+        rightShoulder = -0.3 - 1.2 * ease;
+        rightElbow = -0.5 - 1.0 * ease;
+        handGesture = 'cup';
+    } else if (g === 'eat' || g === 'food') {
+        // Right hand fingertips touch mouth twice
+        const bob = Math.sin(t * Math.PI * 4);
+        rightShoulder = -1.3 + bob * 0.2;
+        rightElbow = -1.4 + bob * 0.2;
+        handGesture = 'pinch';
+    } else if (g === 'book') {
+        // Both palms come together, then open like pages
+        const open = Math.sin(t * Math.PI * 2);
+        leftShoulder = 0.8 + open * 0.3;
+        leftElbow = 1.0;
+        rightShoulder = -0.8 - open * 0.3;
+        rightElbow = -1.0;
+        handGesture = 'flat';
+    } else if (g === 'help') {
+        // Left hand flat palm up, right fist lifts up on top
+        leftShoulder = 0.7;
+        leftElbow = 0.9;
+        rightShoulder = -0.7 - ease * 0.4;
+        rightElbow = -0.9 - ease * 0.4;
+        handGesture = 'fist';
+    } else if (g === 'yes') {
+        // Right fist nods up and down
+        const nod = Math.sin(t * Math.PI * 6);
+        rightShoulder = -0.9;
+        rightElbow = -1.2 + nod * 0.3;
+        handGesture = 'fist';
+    } else if (g === 'no') {
+        // Right hand snaps fingers
+        rightShoulder = -0.9;
+        rightElbow = -1.1;
+        handGesture = 'snap';
+    } else if (g === 'fine' || g === 'hello') {
+        // Right hand waves near temple/chest
+        const wave = Math.sin(t * Math.PI * 6) * 0.25;
+        rightShoulder = -1.4 + wave;
+        rightElbow = -1.5;
+        handGesture = 'wave';
+    } else if (g === 'want') {
+        // Both hands reach forward and pull back
+        const pull = ease * 0.5;
+        leftShoulder = 0.6 + pull;
+        leftElbow = 0.7 - pull;
+        rightShoulder = -0.6 - pull;
+        rightElbow = -0.7 + pull;
+        handGesture = 'claw';
+    } else {
+        // Dynamic procedural signing based on word characters
+        const hash = g.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+        const cycle = Math.sin(t * Math.PI * 2);
+        const sym = (hash % 2 === 0);
+
+        rightShoulder = -0.8 - ease * ((hash % 50) / 100);
+        rightElbow = -0.9 + cycle * 0.3;
+        if (sym) {
+            leftShoulder = 0.8 + ease * (((hash * 3) % 50) / 100);
+            leftElbow = 0.9 - cycle * 0.3;
+        }
+    }
+
+    return { leftShoulder, leftElbow, rightShoulder, rightElbow, handGesture };
+}
+
+function renderAvatarFrame(ctx, w, h, gloss, progress) {
+    ctx.clearRect(0, 0, w, h);
+
+    // 1. Sleek Background with subtle studio gradient
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, h);
+    bgGrad.addColorStop(0, '#0f172a');
+    bgGrad.addColorStop(1, '#020617');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, w, h);
+
+    // Subtle grid/pedestal glow
+    ctx.beginPath();
+    ctx.ellipse(w / 2, h - 25, 70, 15, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+    ctx.fill();
+
+    const cx = w / 2;
+    const cy = h * 0.36;
+
+    // Get smooth angles
+    const angles = getAvatarJointAngles(gloss, progress);
+
+    // 2. Torso & Clothes (Stylized modern 3D-effect aesthetic)
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2;
+
+    // Torso path
+    ctx.beginPath();
+    ctx.moveTo(cx - 28, cy + 30);
+    ctx.lineTo(cx + 28, cy + 30);
+    ctx.lineTo(cx + 22, cy + 85);
+    ctx.lineTo(cx - 22, cy + 85);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Neck
+    ctx.fillStyle = '#fbcfe8';
+    ctx.fillRect(cx - 6, cy + 12, 12, 20);
+
+    // 3. Head & Face
+    // Head shape
+    ctx.beginPath();
+    ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+    ctx.fillStyle = '#fed7aa';
+    ctx.fill();
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Hair
+    ctx.beginPath();
+    ctx.arc(cx, cy - 4, 21, Math.PI, 0);
+    ctx.fillStyle = '#334155';
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.arc(cx - 7, cy - 2, 2.5, 0, Math.PI * 2);
+    ctx.arc(cx + 7, cy - 2, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Friendly Smile
+    ctx.strokeStyle = '#c2410c';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy + 4, 7, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+
+    // 4. Arms & Hands with forward kinematics
+    const upperArmLen = 28;
+    const foreArmLen = 28;
+
+    // Left Arm (Screen Left)
+    const lShoulderX = cx - 28;
+    const lShoulderY = cy + 30;
+    const lElbowX = lShoulderX - Math.sin(angles.leftShoulder) * upperArmLen;
+    const lElbowY = lShoulderY + Math.cos(angles.leftShoulder) * upperArmLen;
+    const lHandX = lElbowX - Math.sin(angles.leftShoulder + angles.leftElbow) * foreArmLen;
+    const lHandY = lElbowY + Math.cos(angles.leftShoulder + angles.leftElbow) * foreArmLen;
+
+    // Right Arm (Screen Right)
+    const rShoulderX = cx + 28;
+    const rShoulderY = cy + 30;
+    const rElbowX = rShoulderX + Math.sin(angles.rightShoulder) * upperArmLen;
+    const rElbowY = rShoulderY + Math.cos(angles.rightShoulder) * upperArmLen;
+    const rHandX = rElbowX + Math.sin(angles.rightShoulder + angles.rightElbow) * foreArmLen;
+    const rHandY = rElbowY + Math.cos(angles.rightShoulder + angles.rightElbow) * foreArmLen;
+
+    // Draw Left Arm
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(lShoulderX, lShoulderY);
+    ctx.lineTo(lElbowX, lElbowY);
+    ctx.lineTo(lHandX, lHandY);
+    ctx.stroke();
+
+    // Left Hand
+    ctx.fillStyle = '#fed7aa';
+    ctx.beginPath();
+    ctx.arc(lHandX, lHandY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#0284c7';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Draw Right Arm
+    ctx.strokeStyle = '#f43f5e';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(rShoulderX, rShoulderY);
+    ctx.lineTo(rElbowX, rElbowY);
+    ctx.lineTo(rHandX, rHandY);
+    ctx.stroke();
+
+    // Right Hand
+    ctx.fillStyle = '#fed7aa';
+    ctx.beginPath();
+    ctx.arc(rHandX, rHandY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#e11d48';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Active Signing Ripple Effect on hands
+    if (gloss !== 'rest') {
+        const pulse = (Math.sin(progress * Math.PI * 4) + 1) * 3;
+        ctx.strokeStyle = 'rgba(74, 222, 128, 0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(rHandX, rHandY, 8 + pulse, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+}
+
+// ================================================================
 //  Conversation Log
-// ============================================================
+// ================================================================
 
 function addLog(text, type) {
-    const log = document.getElementById('conversationLog');
+    const area = document.getElementById('conversationArea');
+    if (!area) return;
+
     const entry = document.createElement('div');
-    entry.className = 'log-entry ' + (type || 'system');
+    entry.className = 'conv-log ' + (type || 'info');
 
     const now = new Date();
     const time = now.getHours().toString().padStart(2, '0') + ':' +
                  now.getMinutes().toString().padStart(2, '0') + ':' +
                  now.getSeconds().toString().padStart(2, '0');
 
-    entry.innerHTML = '<span class="log-time">' + time + '</span><span class="log-text">' + text + '</span>';
-    log.appendChild(entry);
-    log.scrollTop = log.scrollHeight;
+    entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-text">${text}</span>`;
+    area.appendChild(entry);
+    area.scrollTop = area.scrollHeight;
 
-    // Keep max 50 entries
-    while (log.children.length > 50) {
-        log.removeChild(log.firstChild);
+    // Keep max 100 entries
+    const logs = area.querySelectorAll('.conv-log');
+    while (logs.length > 100) {
+        logs[0].remove();
     }
 }
 
-function clearOutput() {
-    document.getElementById('conversationLog').innerHTML = '';
-    document.getElementById('predictionWord').textContent = '---';
-    document.getElementById('predictionConf').textContent = 'Cleared';
-    document.getElementById('top5List').innerHTML = '';
-    addLog('Output cleared', 'system');
+// ================================================================
+//  Utilities
+// ================================================================
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }

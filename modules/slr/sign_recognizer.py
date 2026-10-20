@@ -1,7 +1,7 @@
 """Sign Language Recognizer — High-Level API.
 
 Combines pose estimation, keypoint mapping, frame buffering,
-and TGCN inference into a single easy-to-use class.
+and SPOTER inference into a single easy-to-use class.
 
 Usage:
     recognizer = SignRecognizer()
@@ -24,20 +24,16 @@ import numpy as np
 from .pose_estimator import PoseEstimator
 from .keypoint_mapper import KeypointMapper
 from .frame_buffer import FrameBuffer
-from .tgcn_inference import TGCNInference
+from .spoter_inference import SPOTERInference
 from config.settings import (
     MODEL_CHECKPOINT_PATH, ASL100_GLOSSES,
-    NUM_SAMPLES, HIDDEN_SIZE, NUM_CLASSES,
-    NUM_STAGES, DROP_P, DEVICE, CONFIDENCE_THRESHOLD
+    NUM_SAMPLES, NUM_KEYPOINTS, HIDDEN_DIM, NUM_CLASSES,
+    DEVICE, CONFIDENCE_THRESHOLD
 )
 
 
 class SignRecognizer:
-    """End-to-end sign language recognition pipeline.
-    
-    Pipeline: Camera Frame -> MediaPipe Pose -> 55 Keypoints -> 
-              Frame Buffer -> TGCN Model -> Predicted Sign
-    """
+    """End-to-end sign language recognition pipeline using pre-trained SPOTER Transformer."""
 
     def __init__(self, checkpoint_path=None, confidence_threshold=None):
         """
@@ -51,23 +47,22 @@ class SignRecognizer:
         # Initialize components
         self.pose_estimator = PoseEstimator()
         self.keypoint_mapper = KeypointMapper()
-        self.frame_buffer = FrameBuffer(num_samples=NUM_SAMPLES)
-        self.tgcn = None  # Loaded lazily
+        self.frame_buffer = FrameBuffer(num_samples=NUM_SAMPLES, num_keypoints=NUM_KEYPOINTS)
+        self.spoter = None  # Loaded lazily
         
         self._frame_count = 0
         self._last_result = None
 
     def load_model(self):
-        """Load the TGCN model. Call this before processing frames."""
-        print("Initializing Sign Language Recognition...")
-        self.tgcn = TGCNInference(
+        """Load the pre-trained SPOTER model."""
+        print("Initializing Sign Language Recognition with SPOTER...")
+        self.spoter = SPOTERInference(
             checkpoint_path=self.checkpoint_path,
             gloss_list=ASL100_GLOSSES,
             num_samples=NUM_SAMPLES,
-            hidden_size=HIDDEN_SIZE,
+            num_keypoints=NUM_KEYPOINTS,
+            hidden_dim=HIDDEN_DIM,
             num_classes=NUM_CLASSES,
-            num_stages=NUM_STAGES,
-            drop_p=DROP_P,
             device=DEVICE
         )
         print("Sign Language Recognition ready!")
@@ -86,7 +81,7 @@ class SignRecognizer:
                 'buffer_fill': how full the frame buffer is (0.0-1.0)
             Returns None if no prediction can be made yet.
         """
-        if self.tgcn is None:
+        if self.spoter is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
         # Step 1: Convert BGR -> RGB for MediaPipe
@@ -96,19 +91,19 @@ class SignRecognizer:
         results = self.pose_estimator.process_frame(frame_rgb)
         landmarks = self.pose_estimator.extract_landmarks(results)
 
-        # Step 3: Map to 55 WLASL keypoints
-        keypoints_55 = self.keypoint_mapper.map_landmarks(landmarks)
+        # Step 3: Map to 54 SPOTER keypoints
+        keypoints_54 = self.keypoint_mapper.map_landmarks(landmarks)
 
-        if keypoints_55 is not None:
+        if keypoints_54 is not None:
             # Step 4: Add to frame buffer
-            self.frame_buffer.add_frame(keypoints_55)
+            self.frame_buffer.add_frame(keypoints_54)
 
         self._frame_count += 1
         
         # Step 5: Run prediction if buffer is ready
         if self.frame_buffer.is_ready():
             input_tensor = self.frame_buffer.get_tensor()
-            result = self.tgcn.predict(input_tensor)
+            result = self.spoter.predict(input_tensor)
             
             result['buffer_fill'] = 1.0
             
