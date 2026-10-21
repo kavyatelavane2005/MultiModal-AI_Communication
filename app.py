@@ -7,13 +7,14 @@ Implements the full workflow:
   4. Text Common Layer — Unified text representation
   5. LLM Processing — Grammar, sentences, intent, context
   6. Output Decision — Route based on User B's profile
-  7. Output — Text display, Voice TTS, Sign avatar
+  7. Output — Text display and Voice TTS
   8. Session Loop — Continue or End
 """
 import sys
 import os
 import base64
 import time
+import threading
 import numpy as np
 import cv2
 
@@ -52,6 +53,7 @@ translator = None
 session = None          # Current Session object
 frame_buffer = None     # SLR frame buffer
 sentence_builder = None # Gloss sequence builder
+sentence_lock = threading.Lock()
 text_layer = None       # Text common layer
 output_router = None    # Output decision module
 slr_active = False      # Whether SLR camera is streaming
@@ -83,7 +85,7 @@ def init_session_components():
     """Initialize per-session components (called when session starts)."""
     global frame_buffer, sentence_builder, text_layer
     frame_buffer = FrameBuffer(num_samples=NUM_SAMPLES)
-    sentence_builder = SentenceBuilder(pause_threshold_sec=3.0)
+    sentence_builder = SentenceBuilder(pause_threshold_sec=5.0)
     text_layer = TextCommonLayer()
 
 
@@ -103,6 +105,7 @@ def status():
     return jsonify({
         'models_ready': spoter is not None,
         'session_active': session is not None and session.active,
+        'llm_configured': bool(translator and translator.api_key),
         'glosses': ASL100_GLOSSES,
         'num_classes': NUM_CLASSES,
     })
@@ -116,6 +119,16 @@ def status():
 def handle_connect():
     print("Client connected")
     emit('system_message', {'text': 'Connected to server', 'type': 'success'})
+    if translator and translator.api_key:
+        emit('system_message', {
+            'text': 'Gemini API key loaded from the local environment. It will be checked when you send a message.',
+            'type': 'info'
+        })
+    else:
+        emit('system_message', {
+            'text': 'Gemini API key is not configured. Add GEMINI_API_KEY to your local .env file and restart the app.',
+            'type': 'info'
+        })
 
 
 @socketio.on('disconnect')
@@ -145,6 +158,7 @@ def handle_start_session(data):
         output_router = OutputRouter(user_b_role)
         init_session_components()
         slr_active = False
+        emit('sentence_preview', {'glosses': []})
 
         print(f"Session started: {user_a_role} → {user_b_role}")
         emit('session_started', session.to_dict())
@@ -165,6 +179,7 @@ def handle_end_session():
         session.end()
     slr_active = False
     output_router = None
+    emit('sentence_preview', {'glosses': []})
 
     print("Session ended")
     emit('session_ended', {})
@@ -182,6 +197,7 @@ def handle_swap_roles():
     output_router = OutputRouter(session.user_b_role)
     init_session_components()
     slr_active = False
+    emit('sentence_preview', {'glosses': []})
 
     print(f"Roles swapped: {session.user_a_role} → {session.user_b_role}")
     emit('session_started', session.to_dict())
@@ -189,19 +205,6 @@ def handle_swap_roles():
         'text': f'Roles swapped! Sender is now {session.user_a_role.title()}, Receiver is {session.user_b_role.title()}',
         'type': 'success'
     })
-
-
-# ================================================================
-#  WebSocket Events — API Key
-# ================================================================
-
-@socketio.on('set_api_key')
-def handle_set_api_key(data):
-    """Set the API key for the LLM translator."""
-    api_key = data.get('api_key', '')
-    if api_key and translator:
-        translator.setup(api_key)
-        emit('system_message', {'text': 'API Key configured successfully', 'type': 'success'})
 
 
 # ================================================================
@@ -217,8 +220,9 @@ def handle_start_slr():
         return
 
     slr_active = True
-    if frame_buffer:
-        frame_buffer.clear()
+    with sentence_lock:
+        if frame_buffer:
+            frame_buffer.clear()
     emit('slr_status', {'active': True})
     print("SLR started")
 
@@ -228,8 +232,9 @@ def handle_stop_slr():
     """Stop sign language recognition."""
     global slr_active
     slr_active = False
-    if frame_buffer:
-        frame_buffer.clear()
+    with sentence_lock:
+        if frame_buffer:
+            frame_buffer.clear()
     emit('slr_status', {'active': False})
     print("SLR stopped")
 
@@ -243,7 +248,7 @@ def handle_video_frame(data):
     global slr_active
 
     if not slr_active or spoter is None or not session or not session.active:
-        return
+        return {'processed': False}
 
     try:
         # Decode base64 image
@@ -253,75 +258,169 @@ def handle_video_frame(data):
         frame_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
         if frame_bgr is None:
-            return
+            return {'processed': False}
 
-        # Convert BGR -> RGB
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        prediction = None
+        pending_glosses = None
+        sentence = None
+        stale_segment_discarded = False
 
-        # Extract pose landmarks
-        mp_results = pose_estimator.process_frame(frame_rgb)
-        landmarks = pose_estimator.extract_landmarks(mp_results)
+        # Serialize capture, prediction, and flush decisions. In particular,
+        # a Send click cannot flush between get_tensor() and adding its gloss.
+        with sentence_lock:
+            stale_segment_discarded = frame_buffer.expire_stale_segment()
+            sign_was_in_progress = frame_buffer.is_sign_in_progress()
 
-        # Send landmark data back for visualization
-        landmark_data = {}
-        for key in ['body', 'left_hand', 'right_hand']:
-            if landmarks[key] is not None:
-                landmark_data[key] = landmarks[key].tolist()
+            # Convert BGR -> RGB and extract pose landmarks.
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            mp_results = pose_estimator.process_frame(frame_rgb)
+            landmarks = pose_estimator.extract_landmarks(mp_results)
 
-        if landmark_data:
-            emit('landmarks', landmark_data)
+            landmark_data = {}
+            for key in ['body', 'left_hand', 'right_hand']:
+                if landmarks[key] is not None:
+                    landmark_data[key] = landmarks[key].tolist()
 
-        # Map to keypoints and buffer
-        keypoints = keypoint_mapper.map_landmarks(landmarks)
-        if keypoints is not None:
-            frame_buffer.add_frame(keypoints)
+            keypoints = keypoint_mapper.map_landmarks(landmarks)
+            if keypoints is not None:
+                frame_buffer.add_frame(keypoints)
 
-        # Run prediction if buffer ready
-        fill = frame_buffer.get_fill_ratio()
+            fill = frame_buffer.get_fill_ratio()
+
+            if frame_buffer.is_ready():
+                input_tensor = frame_buffer.get_tensor()
+                prediction = spoter.predict(input_tensor)
+
+                if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
+                    gloss = prediction['gloss']
+                    text_layer.add_sign_gloss(gloss)
+                    sentence_builder.add_word(gloss)
+                    pending_glosses = list(sentence_builder.words)
+
+            # A pause flush cannot win while a sign is still being segmented.
+            sign_in_progress = frame_buffer.is_sign_in_progress()
+            if sign_was_in_progress and not sign_in_progress:
+                # Reset the sentence pause even when this clip was too uncertain
+                # to add as a gloss, so it cannot flush the previous word at once.
+                sentence_builder.mark_activity()
+            if not sign_in_progress:
+                sentence = sentence_builder.check_flush()
+
+        # Send empty landmark updates too, so tracking loss clears the overlay.
+        emit('landmarks', landmark_data)
         emit('buffer_fill', {'fill': fill})
 
-        if frame_buffer.is_ready():
-            input_tensor = frame_buffer.get_tensor()
-            prediction = spoter.predict(input_tensor)
+        if stale_segment_discarded:
+            emit('system_message', {
+                'text': 'Sign tracking was lost; discarded that incomplete sign and kept the collected words.',
+                'type': 'warning'
+            })
 
-            if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
-                gloss = prediction['gloss']
+        if pending_glosses is not None:
+            emit('sentence_preview', {'glosses': pending_glosses})
 
-                # Add to text common layer
-                text_layer.add_sign_gloss(gloss)
-                sentence_builder.add_word(gloss)
+        if prediction and prediction['confidence'] >= CONFIDENCE_THRESHOLD:
+            emit('slr_prediction', {
+                'gloss': prediction['gloss'],
+                'confidence': round(prediction['confidence'] * 100, 1),
+                'top5': [
+                    {'gloss': g, 'confidence': round(c * 100, 1)}
+                    for g, c in prediction['top5']
+                ]
+            })
 
-                emit('slr_prediction', {
-                    'gloss': gloss,
-                    'confidence': round(prediction['confidence'] * 100, 1),
-                    'top5': [
-                        {'gloss': g, 'confidence': round(c * 100, 1)}
-                        for g, c in prediction['top5']
-                    ]
-                })
-
-        # Check if the user paused → trigger processing
-        sentence = sentence_builder.check_flush()
         if sentence:
-            glosses = list(sentence)
-            raw_text = ' '.join(glosses)
-            emit('system_message', {'text': 'Processing sign sequence...', 'type': 'info'})
-            socketio.start_background_task(run_message_processing, raw_text, 'sign', glosses)
+            emit('sentence_preview', {'glosses': []})
+            submit_sign_sentence(sentence)
 
     except Exception as e:
         print(f"Frame processing error: {e}")
+        return {'processed': False}
+
+    return {'processed': True}
+
+
+@socketio.on('finish_sentence')
+def handle_finish_sentence():
+    """Flush the current gloss sequence when the signer presses Send sentence."""
+    if not sentence_builder:
+        return
+
+    prediction = None
+    pending_glosses = None
+    active_sign_finalized = False
+    with sentence_lock:
+        stale_segment_discarded = bool(frame_buffer and frame_buffer.expire_stale_segment())
+        active_sign_finalized = bool(frame_buffer and frame_buffer.is_sign_in_progress())
+
+        # An explicit Send action marks the end of the current sign as well.
+        # Predict it before flushing so the last sign is not left in the buffer.
+        if active_sign_finalized:
+            frame_buffer.force_finalize()
+            if frame_buffer.is_ready():
+                prediction = spoter.predict(frame_buffer.get_tensor())
+                if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
+                    gloss = prediction['gloss']
+                    text_layer.add_sign_gloss(gloss)
+                    sentence_builder.add_word(gloss)
+                    pending_glosses = list(sentence_builder.words)
+
+        sentence = sentence_builder.force_flush()
+
+    if stale_segment_discarded:
+        emit('system_message', {
+            'text': 'Sign tracking was lost; discarded that incomplete sign and kept the collected words.',
+            'type': 'warning'
+        })
+
+    if pending_glosses is not None:
+        emit('sentence_preview', {'glosses': pending_glosses})
+    if prediction and prediction['confidence'] >= CONFIDENCE_THRESHOLD:
+        emit('slr_prediction', {
+            'gloss': prediction['gloss'],
+            'confidence': round(prediction['confidence'] * 100, 1),
+            'top5': [
+                {'gloss': g, 'confidence': round(c * 100, 1)}
+                for g, c in prediction['top5']
+            ]
+        })
+
+    emit('sentence_preview', {'glosses': []})
+    current_sign_confident = bool(
+        prediction and prediction['confidence'] >= CONFIDENCE_THRESHOLD
+    )
+    if active_sign_finalized and not current_sign_confident:
+        warning = ('The final sign was too short or uncertain; sending only earlier detected signs.'
+                   if sentence else
+                   'The current sign was too short or uncertain to add; no confident sentence was collected.')
+        emit('system_message', {'text': warning, 'type': 'warning'})
+
+    if sentence:
+        submit_sign_sentence(sentence)
+    elif not active_sign_finalized:
+        emit('system_message', {'text': 'Sign a few words before sending a sentence.', 'type': 'info'})
+
+
+def submit_sign_sentence(glosses):
+    """Send a complete sequence of recognized glosses through the LLM pipeline."""
+    glosses = list(glosses)
+    raw_text = ' '.join(glosses)
+    emit('system_message', {'text': 'Processing sign sentence...', 'type': 'info'})
+    socketio.start_background_task(run_message_processing, raw_text, 'sign', glosses)
 
 
 @socketio.on('reset_buffer')
 def handle_reset_buffer():
     """Reset the frame buffer."""
-    if frame_buffer:
-        frame_buffer.clear()
-    if sentence_builder:
-        sentence_builder.words = []
-    if text_layer:
-        text_layer.clear()
+    with sentence_lock:
+        if frame_buffer:
+            frame_buffer.clear()
+        if sentence_builder:
+            sentence_builder.words = []
+        if text_layer:
+            text_layer.clear()
     emit('buffer_fill', {'fill': 0})
+    emit('sentence_preview', {'glosses': []})
     emit('system_message', {'text': 'Buffer reset', 'type': 'info'})
 
 
@@ -384,13 +483,14 @@ def run_message_processing(raw_text, source, glosses=None):
     Args:
         raw_text: The input text (from any modality).
         source: Input source ('sign', 'speech', 'text').
-        glosses: Original sign glosses (for avatar, if source is 'sign').
+        glosses: Original sign glosses (for sign translation).
     """
     global session, output_router
 
     # Step 1: LLM Processing (with safe fallback)
     fallback = raw_text.title() if source == 'sign' else raw_text
     processed_text = fallback
+    llm_used = False
 
     if translator and translator.api_key:
         try:
@@ -399,19 +499,65 @@ def run_message_processing(raw_text, source, glosses=None):
             else:
                 candidate = translator.translate_general(raw_text)
 
-            if candidate and not candidate.startswith("Translation error:") and not candidate.startswith("Error:"):
+            if (candidate and not translator.last_error
+                    and not candidate.startswith("Translation error:")
+                    and not candidate.startswith("Error:")):
                 processed_text = candidate
             else:
-                print(f"[LLM] Skipping invalid translation '{candidate}', using fallback '{fallback}'")
+                print(f"[LLM] Translation unavailable; using fallback '{fallback}'")
+                error_code = translator.last_error_code
+                if error_code in (400, 401, 403):
+                    failure_message = (
+                        f'Google Gemini rejected this request ({error_code}). Check the GEMINI_API_KEY, '
+                        'that the Generative Language API is enabled for its Google project, and the key restrictions.'
+                    )
+                elif error_code == 404:
+                    failure_message = 'Google Gemini could not find the model. Check GEMINI_MODEL in the local .env file.'
+                elif error_code == 408:
+                    failure_message = 'Google Gemini timed out processing this request (408). Try again shortly.'
+                elif error_code == 429:
+                    reason = (translator.last_error_reason or '').lower()
+                    if reason in {'resource_exhausted', 'quota_exceeded'}:
+                        failure_message = (
+                            'Google Gemini reports that its quota or rate limit is exhausted. Check the project quota '
+                            'and usage in Google AI Studio, then wait or resolve the quota limit before retrying.'
+                        )
+                    else:
+                        failure_message = (
+                            'Google Gemini returned HTTP 429. Check Google AI Studio usage and project quotas; '
+                            'if it is a temporary rate limit, wait briefly before sending again.'
+                        )
+                    if reason:
+                        failure_message += f' (reason: {reason})'
+                elif isinstance(error_code, int) and error_code >= 500:
+                    failure_message = f'Google Gemini returned a server error ({error_code}). Try again shortly.'
+                elif error_code == 'timeout':
+                    failure_message = 'The Google Gemini request timed out. Check the connection and try again.'
+                elif error_code == 'network':
+                    failure_message = 'Could not connect to Google Gemini. Check the internet connection or firewall.'
+                else:
+                    failure_message = 'The Google Gemini request failed. Check the API key, model access, project quota, and network.'
+                failure_message += ' Sending the recognized glosses as fallback.'
                 socketio.emit('system_message', {
-                    'text': 'LLM translation unavailable (check API key); displaying detected words directly.',
-                    'type': 'info'
+                    'text': failure_message,
+                    'type': 'error'
                 })
+            llm_used = bool(candidate and not translator.last_error
+                            and not candidate.startswith("Translation error:")
+                            and not candidate.startswith("Error:"))
         except Exception as e:
             print(f"LLM processing error: {e}")
             processed_text = fallback
+            socketio.emit('system_message', {
+                'text': 'LLM processing failed; sending the recognized glosses as fallback.',
+                'type': 'error'
+            })
     else:
         processed_text = fallback
+        socketio.emit('system_message', {
+            'text': 'Gemini API key is not configured. Add GEMINI_API_KEY to the local .env file and restart the app to form sentences with the LLM.',
+            'type': 'info'
+        })
 
     # Step 2: Output Routing
     if output_router:
@@ -420,10 +566,8 @@ def run_message_processing(raw_text, source, glosses=None):
         outputs = {
             'text': processed_text,
             'tts_text': processed_text,
-            'avatar_glosses': glosses,
             'show_text': True,
             'speak_text': False,
-            'show_avatar': False,
         }
 
     # Step 3: Save to session history
@@ -435,6 +579,7 @@ def run_message_processing(raw_text, source, glosses=None):
         'original_text': raw_text,
         'processed_text': processed_text,
         'source': source,
+        'llm_used': llm_used,
         'outputs': outputs
     })
 

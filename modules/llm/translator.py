@@ -1,199 +1,217 @@
-import os
-import base64
+"""Gemini-backed sentence formation for the sign communication pipeline."""
+
 import json
-import urllib.request
+import os
 import urllib.error
+import urllib.parse
+import urllib.request
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class ASLTranslator:
-    """Uses Groq API to translate a sequence of ASL glosses
-    into a coherent, grammatically correct English sentence.
-    Also supports vision-based refinement for the Ensemble mode.
-    """
+    """Translate recognized ASL glosses and clean up typed or spoken text."""
+
     def __init__(self, api_key=None):
-        self.api_key = api_key
-        self.groq_api_url = "https://openrouter.ai/api/v1/chat/completions"
-        
-        self.text_model = "qwen/qwen3.6-27b"
-        self.vision_model = "qwen/qwen-vl-plus:free"
+        self.api_key = (
+            api_key if api_key is not None
+            else os.getenv("GEMINI_API_KEY")
+        )
+        self.last_error = None
+        self.last_error_code = None
+        self.last_error_reason = None
+        self.api_base = "https://generativelanguage.googleapis.com/v1beta"
+        self.text_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        self.vision_model = os.getenv("GEMINI_VISION_MODEL", self.text_model)
 
         self.text_system_prompt = (
-            "You are an expert American Sign Language (ASL) translator. "
-            "I will provide a sequence of predicted ASL glosses (words) from a visual AI model. "
-            "The visual model has an accuracy of ~60%, so some words might be slightly misclassified "
-            "(e.g., 'look' instead of 'book', 'fine' instead of 'five'). "
-            "Your job is to fix any obvious visual misclassifications based on context, "
-            "apply proper English grammar (ASL grammar is different, e.g. Time-Topic-Comment), "
-            "and output ONLY the final conversational English sentence. "
-            "Do not include any explanations or quotes, just the translated text."
+            "Turn an ordered sequence of predicted American Sign Language (ASL) glosses "
+            "into one concise, natural English sentence. The glosses are uncertain labels "
+            "from a visual model, not a complete English sentence. Preserve their supported "
+            "meaning; reorder or add only small grammatical words needed for readable English. "
+            "Do not invent details or replace a gloss with a different sign based only on a guess. "
+            "Return only the sentence, with no explanation or quotation marks."
         )
 
         self.general_system_prompt = (
-            "You are a communication assistant. The user is sending a message "
-            "in a multi-modal communication system for people with disabilities. "
-            "Clean up any grammar issues, fix obvious speech recognition errors, "
-            "and output ONLY the corrected, natural English sentence. "
-            "If the input is already correct, return it as-is. "
-            "Do not add explanations, just the text."
+            "You are a communication assistant. Clean up grammar and obvious speech recognition "
+            "errors in the user's message. Return only the corrected, natural English sentence. "
+            "If the input is already correct, return it as-is. Do not add explanations."
         )
 
         self.vision_system_prompt = (
-            "You are an expert American Sign Language (ASL) recognition system. "
-            "You will receive an image of a person performing an ASL sign, along with "
-            "the top predictions from a skeleton-based AI model. "
-            "Your job is to look at the hand shape, palm orientation, finger positions, "
-            "and body posture in the image, and determine which of the given predictions "
-            "is the most likely correct ASL sign. "
-            "Respond with ONLY a JSON object in this exact format: "
-            "{\"sign\": \"<word>\", \"confidence\": <0-100>, \"reason\": \"<brief reason>\"} "
-            "Do not include markdown formatting or code blocks."
+            "You are helping review a visual sign recognition result. Compare the visible hand "
+            "shape, palm orientation, finger positions, and body posture with the provided model "
+            "predictions. Choose a listed prediction unless another sign is clearly more likely. "
+            'Return only JSON in this format: {"sign":"word","confidence":0,"reason":"brief reason"}.'
         )
 
-    def setup(self, api_key):
-        """Initialize the Groq client with the given API key."""
-        self.api_key = api_key
+    def _record_error(self, error):
+        """Store only the HTTP status and safe provider error category."""
+        if isinstance(error, urllib.error.HTTPError):
+            self.last_error_code = error.code
+            self.last_error_reason = getattr(error, "gemini_error_reason", None)
+            label = f"HTTP {error.code}"
+        elif isinstance(error, TimeoutError) or (
+            isinstance(error, urllib.error.URLError)
+            and isinstance(error.reason, TimeoutError)
+        ):
+            self.last_error_code = "timeout"
+            label = "request timed out"
+        elif isinstance(error, urllib.error.URLError):
+            self.last_error_code = "network"
+            label = "network error"
+        else:
+            self.last_error_code = "request"
+            label = "request error"
 
-    def _make_request(self, payload):
-        """Helper to make REST API call to Groq."""
+        self.last_error = label
+        print(f"[LLM Translator] Gemini {label}")
+
+    def _make_request(self, payload, model=None):
+        """Call Gemini generateContent and return concatenated text output."""
         if not self.api_key:
-            raise ValueError("Groq API key not configured.")
+            raise ValueError("Gemini API key is not configured.")
 
+        model_name = urllib.parse.quote(model or self.text_model, safe="-_.")
+        endpoint = f"{self.api_base}/models/{model_name}:generateContent"
         req = urllib.request.Request(
-            self.groq_api_url,
-            data=json.dumps(payload).encode('utf-8'),
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "x-goog-api-key": self.api_key,
                 "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
+            },
         )
 
         try:
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result['choices'][0]['message']['content']
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
-            raise Exception(f"HTTP {e.code}: {error_body}")
-        except Exception as e:
-            raise Exception(str(e))
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+
+            text_parts = []
+            for candidate in result.get("candidates", []):
+                content = candidate.get("content", {})
+                for part in content.get("parts", []):
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        text_parts.append(text)
+
+            if not text_parts:
+                raise ValueError("Gemini response contained no text output.")
+            return "".join(text_parts)
+        except urllib.error.HTTPError as error:
+            # Parse only the provider's stable status label; never log or retain
+            # the full response body, which may contain request details.
+            try:
+                body = error.read(65536)
+                details = json.loads(body.decode("utf-8")).get("error", {})
+                if isinstance(details, dict):
+                    error.gemini_error_reason = details.get("status") or details.get("reason")
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError, OSError):
+                pass
+            error.close()
+            raise
+
+    @staticmethod
+    def _payload(system_prompt, user_text, max_output_tokens=128):
+        return {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": max_output_tokens,
+            },
+        }
 
     def translate(self, words_list):
-        """Translate a list of ASL glosses into a sentence.
-        
-        Args:
-            words_list (list): List of strings (glosses).
-            
-        Returns:
-            str: Translated English sentence.
-        """
+        """Turn an ordered list of recognized sign glosses into a sentence."""
         if not words_list:
             return ""
 
+        self.last_error = None
+        self.last_error_code = None
+        self.last_error_reason = None
         fallback_text = " ".join(words_list).title()
-
         if not self.api_key:
             return fallback_text
 
-        input_text = " ".join(words_list)
-        
-        payload = {
-            "model": self.text_model,
-            "messages": [
-                {"role": "system", "content": self.text_system_prompt},
-                {"role": "user", "content": f"Glosses: [{input_text}]"}
-            ],
-            "temperature": 0.3
-        }
-
+        payload = self._payload(
+            self.text_system_prompt,
+            f"ASL glosses: [{ ' '.join(words_list) }]",
+            max_output_tokens=128,
+        )
         try:
-            response_text = self._make_request(payload)
-            return response_text.strip()
-        except Exception as e:
-            print(f"[LLM Translator] API call failed: {e}. Using raw glosses fallback.")
+            return self._make_request(payload).strip()
+        except Exception as error:
+            self._record_error(error)
             return fallback_text
 
     def translate_general(self, text):
-        """Process general text (speech/keyboard) through LLM for cleanup.
-        
-        Args:
-            text (str): Input text from speech or keyboard.
-            
-        Returns:
-            str: Cleaned/corrected English sentence.
-        """
+        """Clean up a message entered by keyboard or speech recognition."""
         if not text or not text.strip():
             return ""
 
+        self.last_error = None
+        self.last_error_code = None
+        self.last_error_reason = None
         if not self.api_key:
-            return text  # Pass through if no API key
+            return text
 
-        payload = {
-            "model": self.text_model,
-            "messages": [
-                {"role": "system", "content": self.general_system_prompt},
-                {"role": "user", "content": text}
-            ],
-            "temperature": 0.2
-        }
-
+        payload = self._payload(
+            self.general_system_prompt,
+            text,
+            max_output_tokens=256,
+        )
         try:
-            response_text = self._make_request(payload)
-            return response_text.strip()
-        except Exception as e:
-            print(f"[LLM Translator] General text API call failed: {e}. Using original text.")
+            return self._make_request(payload).strip()
+        except Exception as error:
+            self._record_error(error)
             return text
 
     def refine_with_image(self, image_b64, top5_predictions):
-        """Use Groq Vision to refine skeleton model predictions.
-        
-        Args:
-            image_b64 (str): Base64-encoded JPEG image of the signer.
-            top5_predictions (list): List of (gloss, confidence%) tuples.
-            
-        Returns:
-            dict: {'sign': str, 'confidence': int, 'reason': str}
-                  or {'error': str} on failure.
-        """
+        """Use Gemini vision to review the SPOTER model's top sign predictions."""
         if not self.api_key:
-            return {"error": "Groq API key not configured."}
+            return {"error": "Gemini API key is not configured."}
+
+        top5_text = "\n".join(
+            f"{index + 1}. {gloss} ({confidence}%)"
+            for index, (gloss, confidence) in enumerate(top5_predictions)
+        )
+        prompt = (
+            "Review this image of a person signing. The skeleton model's top predictions are:\n"
+            f"{top5_text}\n\n"
+            "Based on the visible hand shape, finger positions, palm orientation, and body posture, "
+            "select the most likely prediction. Suggest an unlisted sign only if clearly supported."
+        )
+        payload = {
+            "systemInstruction": {"parts": [{"text": self.vision_system_prompt}]},
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {"inlineData": {"mimeType": "image/jpeg", "data": image_b64}},
+                ],
+            }],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 256,
+                "responseMimeType": "application/json",
+            },
+        }
 
         try:
-            top5_str = "\n".join([f"  {i+1}. {g} ({c}%)" for i, (g, c) in enumerate(top5_predictions)])
-            prompt = (
-                f"Here is an image of a person performing an ASL sign.\n\n"
-                f"The skeleton-based AI model predicted these top 5 possibilities:\n"
-                f"{top5_str}\n\n"
-                f"Based on the hand shape, finger positions, and palm orientation visible "
-                f"in the image, which prediction is most likely correct? "
-                f"You may also suggest a sign NOT in the list if you are very confident."
-            )
-
-            payload = {
-                "model": self.vision_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": self.vision_system_prompt + "\n\n" + prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                        ]
-                    }
-                ],
-                "temperature": 0.2
-            }
-
-            response_text = self._make_request(payload)
-            response_text = response_text.strip()
-            
-            # Clean markdown code blocks if present
+            response_text = self._make_request(payload, model=self.vision_model).strip()
             if response_text.startswith("```"):
-                response_text = response_text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            
-            result = json.loads(response_text)
-            return result
-
+                response_text = response_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            return json.loads(response_text)
         except json.JSONDecodeError:
-            return {"sign": response_text[:30], "confidence": 50, "reason": "Parsed from text"}
-        except Exception as e:
-            return {"error": str(e)}
-
+            return {
+                "sign": response_text[:30],
+                "confidence": 50,
+                "reason": "Parsed from text",
+            }
+        except Exception as error:
+            self._record_error(error)
+            return {"error": self.last_error or "Gemini request failed."}

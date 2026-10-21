@@ -7,6 +7,7 @@ The legacy mp.solutions.holistic API has been removed in recent
 MediaPipe versions. This module uses the new mp.tasks.vision API.
 """
 import os
+import time
 import numpy as np
 
 import mediapipe as mp
@@ -60,7 +61,7 @@ class PoseEstimator:
         )
 
         self.landmarker = HolisticLandmarker.create_from_options(options)
-        self._timestamp_ms = 0
+        self._last_timestamp_ms = 0
 
     def process_frame(self, frame_rgb):
         """Process a single RGB frame and extract landmarks.
@@ -78,10 +79,12 @@ class PoseEstimator:
         # Create MediaPipe Image from numpy array
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
-        # Increment timestamp for VIDEO mode
-        self._timestamp_ms += 33  # ~30 FPS
+        # VIDEO mode timestamps must follow capture time; assuming 30 FPS when
+        # inference is slower makes MediaPipe's temporal tracking lag behind.
+        timestamp_ms = time.monotonic_ns() // 1_000_000
+        self._last_timestamp_ms = max(timestamp_ms, self._last_timestamp_ms + 1)
 
-        results = self.landmarker.detect_for_video(mp_image, self._timestamp_ms)
+        results = self.landmarker.detect_for_video(mp_image, self._last_timestamp_ms)
         return results
 
     def extract_landmarks(self, results):

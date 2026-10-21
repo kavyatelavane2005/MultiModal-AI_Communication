@@ -6,14 +6,14 @@
     <title>MultiModal Bridge - Communication System</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css?v=professional-light-2">
 </head>
 <body>
     <!-- Top Navigation -->
     <nav class="top-nav">
         <div class="nav-brand">
-            <div class="brand-icon">&#9995;</div>
+            <div class="brand-icon" aria-hidden="true">MB</div>
             <div>
                 <h1>MultiModal Bridge</h1>
                 <span class="nav-subtitle">AI Communication System</span>
@@ -39,7 +39,6 @@
                 <!-- User A (Sender) -->
                 <div class="role-card">
                     <div class="role-card-header sender">
-                        <span class="role-icon">🗣️</span>
                         <h3>User A — Sender</h3>
                         <p>Who is sending the message?</p>
                     </div>
@@ -47,7 +46,7 @@
                         <label class="role-option">
                             <input type="radio" name="userA" value="deaf">
                             <div class="role-label">
-                                <span class="role-emoji">🤟</span>
+                                <span class="role-mark" aria-hidden="true">D</span>
                                 <span>Deaf</span>
                                 <span class="role-desc">Sign language + Text</span>
                             </div>
@@ -55,7 +54,7 @@
                         <label class="role-option">
                             <input type="radio" name="userA" value="blind">
                             <div class="role-label">
-                                <span class="role-emoji">👁️</span>
+                                <span class="role-mark" aria-hidden="true">B</span>
                                 <span>Blind</span>
                                 <span class="role-desc">Speech + Text</span>
                             </div>
@@ -63,7 +62,7 @@
                         <label class="role-option">
                             <input type="radio" name="userA" value="mute">
                             <div class="role-label">
-                                <span class="role-emoji">🤐</span>
+                                <span class="role-mark" aria-hidden="true">M</span>
                                 <span>Mute</span>
                                 <span class="role-desc">Sign language + Text</span>
                             </div>
@@ -71,7 +70,7 @@
                         <label class="role-option">
                             <input type="radio" name="userA" value="normal" checked>
                             <div class="role-label">
-                                <span class="role-emoji">👤</span>
+                                <span class="role-mark" aria-hidden="true">N</span>
                                 <span>Normal</span>
                                 <span class="role-desc">All inputs available</span>
                             </div>
@@ -85,7 +84,6 @@
                 <!-- User B (Receiver) -->
                 <div class="role-card">
                     <div class="role-card-header receiver">
-                        <span class="role-icon">👂</span>
                         <h3>User B — Receiver</h3>
                         <p>Who is receiving the message?</p>
                     </div>
@@ -93,15 +91,15 @@
                         <label class="role-option">
                             <input type="radio" name="userB" value="deaf">
                             <div class="role-label">
-                                <span class="role-emoji">🤟</span>
+                                <span class="role-mark" aria-hidden="true">D</span>
                                 <span>Deaf</span>
-                                <span class="role-desc">Text + Sign avatar</span>
+                                <span class="role-desc">Text captions</span>
                             </div>
                         </label>
                         <label class="role-option">
                             <input type="radio" name="userB" value="blind">
                             <div class="role-label">
-                                <span class="role-emoji">👁️</span>
+                                <span class="role-mark" aria-hidden="true">B</span>
                                 <span>Blind</span>
                                 <span class="role-desc">Voice TTS only</span>
                             </div>
@@ -109,7 +107,7 @@
                         <label class="role-option">
                             <input type="radio" name="userB" value="mute">
                             <div class="role-label">
-                                <span class="role-emoji">🤐</span>
+                                <span class="role-mark" aria-hidden="true">M</span>
                                 <span>Mute</span>
                                 <span class="role-desc">Text + Voice</span>
                             </div>
@@ -117,20 +115,12 @@
                         <label class="role-option">
                             <input type="radio" name="userB" value="normal" checked>
                             <div class="role-label">
-                                <span class="role-emoji">👤</span>
+                                <span class="role-mark" aria-hidden="true">N</span>
                                 <span>Normal</span>
                                 <span class="role-desc">All outputs</span>
                             </div>
                         </label>
                     </div>
-                </div>
-            </div>
-
-            <!-- API Key -->
-            <div class="setup-apikey">
-                <label>OpenRouter API Key (optional — for LLM translation)</label>
-                <div class="apikey-row">
-                    <input type="password" id="setupApiKey" placeholder="Enter your API key..." autocomplete="new-password" spellcheck="false">
                 </div>
             </div>
 
@@ -153,10 +143,6 @@
                 <span class="session-badge" id="sessionBadge">Active</span>
             </div>
             <div class="session-actions">
-                <div class="session-apikey-mini">
-                    <input type="password" id="commApiKey" placeholder="API Key..." autocomplete="new-password" spellcheck="false" title="OpenRouter API Key for LLM">
-                    <button class="ctrl-btn secondary sm" onclick="saveCommApiKey()">Save Key</button>
-                </div>
                 <button class="ctrl-btn secondary" id="btnSwapRoles" onclick="swapRoles()" title="Swap sender and receiver for reply turn">
                     <span>⇄</span> Swap Roles / Reply
                 </button>
@@ -186,13 +172,13 @@
                 <!-- Input Mode Tabs -->
                 <div class="input-tabs" id="inputTabs">
                     <button class="input-tab active" data-mode="sign" onclick="switchInputMode('sign')">
-                        <span>🤟</span> Sign Language
+                        <span>Sign Language</span>
                     </button>
                     <button class="input-tab" data-mode="speech" onclick="switchInputMode('speech')">
-                        <span>🎤</span> Speech
+                        <span>Speech</span>
                     </button>
                     <button class="input-tab" data-mode="text" onclick="switchInputMode('text')">
-                        <span>⌨️</span> Text
+                        <span>Text</span>
                     </button>
                 </div>
 
@@ -218,13 +204,23 @@
                         </div>
                         <div class="top5-mini" id="top5Mini"></div>
                     </div>
+                    <div class="sentence-send-row">
+                        <div class="sentence-preview" id="sentencePreview">Collected signs will appear here · pause briefly between signs; Send ends the current sign, or auto-send after 5 seconds idle</div>
+                        <button class="send-btn sentence-send-btn" id="btnFinishSentence"
+                                onclick="finishSignSentence()" disabled>
+                            <span>Send sentence now</span><span>→</span>
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Speech Input -->
                 <div class="input-view hidden" id="speechView">
                     <div class="mic-container">
                         <div class="mic-circle" id="micCircle">
-                            <div class="mic-icon">🎤</div>
+                            <svg class="mic-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <rect x="9" y="3" width="6" height="12" rx="3"></rect>
+                                <path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"></path>
+                            </svg>
                         </div>
                         <p class="mic-status" id="micStatus">Click Start to listen</p>
                         <div class="speech-transcript" id="speechTranscript">
@@ -257,21 +253,9 @@
                 <!-- Conversation Messages -->
                 <div class="conversation-area" id="conversationArea">
                     <div class="conv-welcome">
-                        <div class="conv-welcome-icon">💬</div>
+                        <div class="conv-welcome-icon" aria-hidden="true">MB</div>
                         <p>Messages will appear here</p>
                         <p class="conv-welcome-sub">Send a message using the input panel</p>
-                    </div>
-                </div>
-
-                <!-- Sign Avatar Display (shown for deaf receiver) -->
-                <div class="avatar-panel hidden" id="avatarPanel">
-                    <div class="avatar-header">
-                        <span class="avatar-dot"></span>
-                        <h3>Sign Avatar</h3>
-                    </div>
-                    <div class="avatar-display" id="avatarDisplay">
-                        <canvas id="avatarCanvas" width="280" height="200"></canvas>
-                        <div class="avatar-gloss" id="avatarGloss">---</div>
                     </div>
                 </div>
 
@@ -301,6 +285,6 @@
 
     <!-- Scripts -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=professional-light"></script>
 </body>
 </html>

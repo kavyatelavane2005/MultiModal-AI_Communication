@@ -5,7 +5,7 @@
  *   1. Session setup (role selection)
  *   2. Input acquisition (sign / speech / text)
  *   3. Message processing (via server + LLM)
- *   4. Output routing (text / TTS / avatar)
+ *   4. Output routing (text / TTS)
  *   5. Session loop (continue / end)
  */
 
@@ -17,6 +17,7 @@ let socket = null;
 let sessionActive = false;
 let currentInputMode = 'sign';
 let isInputActive = false;
+let collectedSignCount = 0;
 
 // SLR state
 let webcamStream = null;
@@ -29,7 +30,7 @@ let recognition = null;
 let userARole = 'normal';
 let userBRole = 'normal';
 let availableInputs = ['sign', 'speech', 'text'];
-let outputModes = ['text', 'tts', 'avatar'];
+let outputModes = ['text', 'tts'];
 
 let selectedCameraId = localStorage.getItem('preferredCameraId') || null;
 let isSendingFrame = false;
@@ -76,10 +77,7 @@ function initSocket() {
     });
 
     // SLR events
-    socket.on('landmarks', (data) => {
-        isSendingFrame = false;
-        drawLandmarks(data);
-    });
+    socket.on('landmarks', drawLandmarks);
 
     socket.on('buffer_fill', (data) => {
         updateBufferBar(data.fill);
@@ -87,6 +85,19 @@ function initSocket() {
 
     socket.on('slr_prediction', (data) => {
         showDetection(data);
+    });
+
+    socket.on('sentence_preview', (data) => {
+        const glosses = data.glosses || [];
+        const preview = document.getElementById('sentencePreview');
+        const button = document.getElementById('btnFinishSentence');
+        if (!preview || !button) return;
+
+        collectedSignCount = glosses.length;
+        preview.textContent = glosses.length
+            ? `Collected signs: ${glosses.join(' ')} · pause briefly between signs; Send ends the current sign, or auto-send after 5 seconds idle`
+            : 'Collected signs will appear here · pause briefly between signs; Send ends the current sign, or auto-send after 5 seconds idle';
+        updateSentenceSendButton();
     });
 
     socket.on('slr_status', (data) => {
@@ -117,15 +128,6 @@ function startSession() {
     userARole = userA.value;
     userBRole = userB.value;
 
-    // Set API key if provided
-    const apiKey = document.getElementById('setupApiKey').value.trim();
-    if (apiKey) {
-        // Wait for connection if needed
-        if (socket && socket.connected) {
-            socket.emit('set_api_key', { api_key: apiKey });
-        }
-    }
-
     socket.emit('start_session', {
         user_a_role: userARole,
         user_b_role: userBRole
@@ -138,7 +140,7 @@ function onSessionStarted(data) {
     outputModes = data.output_modes;
 
     // Update session label
-    const roleLabels = { deaf: '🤟 Deaf', blind: '👁️ Blind', mute: '🤐 Mute', normal: '👤 Normal' };
+    const roleLabels = { deaf: 'Deaf', blind: 'Blind', mute: 'Mute', normal: 'Normal' };
     document.getElementById('sessionLabel').textContent =
         (roleLabels[data.user_a_role] || data.user_a_role) + ' → ' +
         (roleLabels[data.user_b_role] || data.user_b_role);
@@ -149,10 +151,6 @@ function onSessionStarted(data) {
 
     // Configure output badges
     configureOutputBadges(outputModes);
-
-    // Show/hide avatar panel
-    const avatarPanel = document.getElementById('avatarPanel');
-    avatarPanel.classList.toggle('hidden', !outputModes.includes('avatar'));
 
     // Show output target
     document.getElementById('outputTarget').textContent =
@@ -177,22 +175,6 @@ function swapRoles() {
     }
 }
 
-function saveCommApiKey() {
-    const input = document.getElementById('commApiKey');
-    if (!input) return;
-    const key = input.value.trim();
-    if (key) {
-        if (socket && socket.connected) {
-            socket.emit('set_api_key', { api_key: key });
-            input.value = '';
-            input.placeholder = 'Saved ✓';
-            addLog('OpenRouter API Key updated successfully', 'success');
-        }
-    } else {
-        addLog('Please enter a valid API key', 'error');
-    }
-}
-
 function endSession() {
     stopAllInputs();
 
@@ -213,7 +195,7 @@ function onSessionEnded() {
     const area = document.getElementById('conversationArea');
     area.innerHTML = `
         <div class="conv-welcome">
-            <div class="conv-welcome-icon">💬</div>
+            <div class="conv-welcome-icon" aria-hidden="true">MB</div>
             <p>Messages will appear here</p>
             <p class="conv-welcome-sub">Send a message using the input panel</p>
         </div>
@@ -250,7 +232,7 @@ function configureInputTabs(inputs) {
 
 function configureOutputBadges(modes) {
     const container = document.getElementById('outputBadges');
-    const labels = { text: '📝 Text', tts: '🔊 Voice', avatar: '🤟 Avatar' };
+    const labels = { text: 'Text', tts: 'Voice' };
     container.innerHTML = modes.map(m =>
         `<span class="output-badge">${labels[m] || m}</span>`
     ).join('');
@@ -301,6 +283,7 @@ function toggleInput() {
 
 function startCurrentInput() {
     isInputActive = true;
+    updateSentenceSendButton();
     document.getElementById('toggleText').textContent = 'Stop';
     document.getElementById('toggleIcon').textContent = '\u23F9';
     document.getElementById('btnToggle').classList.add('active');
@@ -313,6 +296,7 @@ function startCurrentInput() {
 
 function stopAllInputs() {
     isInputActive = false;
+    updateSentenceSendButton();
     document.getElementById('toggleText').textContent = 'Start';
     document.getElementById('toggleIcon').textContent = '\u25B6';
     document.getElementById('btnToggle').classList.remove('active');
@@ -400,8 +384,8 @@ function startSLR() {
 
     // Build constraints: prefer user facing and selected laptop deviceId
     const videoConstraints = {
-        width: { ideal: 640 },
-        height: { ideal: 480 },
+        width: { ideal: 480 },
+        height: { ideal: 360 },
         facingMode: "user"
     };
 
@@ -424,7 +408,7 @@ function startSLR() {
             frameInterval = setInterval(() => {
                 if (!isInputActive) return;
                 sendFrame(video);
-            }, 100);
+            }, 120);
         })
         .catch(err => {
             // If exact deviceId failed, fallback to any user-facing camera
@@ -441,7 +425,7 @@ function startSLR() {
                         frameInterval = setInterval(() => {
                             if (!isInputActive) return;
                             sendFrame(video);
-                        }, 100);
+                        }, 120);
                     })
                     .catch(e => {
                         addLog('Camera access denied: ' + e.message, 'error');
@@ -485,25 +469,22 @@ function sendFrame(video) {
     if (isSendingFrame) return;
     if (!video || !video.videoWidth || !video.videoHeight) return;
 
-    // Reuse a single offscreen canvas (prevents GC churn lag)
+    // Resize before encoding to reduce CPU work and network payload size.
     if (!offscreenCanvas) {
         offscreenCanvas = document.createElement('canvas');
-        offscreenCanvas.width = 480;
-        offscreenCanvas.height = 360;
+        offscreenCanvas.width = 320;
+        offscreenCanvas.height = 240;
     }
 
     const ctx = offscreenCanvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, 480, 360);
+    ctx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
 
     isSendingFrame = true;
 
-    // Safety timeout: unlock if network packet was dropped
-    setTimeout(() => {
+    const dataUrl = offscreenCanvas.toDataURL('image/jpeg', 0.45);
+    socket.emit('video_frame', { image: dataUrl }, () => {
         isSendingFrame = false;
-    }, 150);
-
-    const dataUrl = offscreenCanvas.toDataURL('image/jpeg', 0.5);
-    socket.emit('video_frame', { image: dataUrl });
+    });
 }
 
 function drawLandmarks(data) {
@@ -617,6 +598,20 @@ function resetBuffer() {
     document.getElementById('top5Mini').innerHTML = '';
 }
 
+function finishSignSentence() {
+    if (socket && socket.connected) {
+        socket.emit('finish_sentence');
+    }
+}
+
+function updateSentenceSendButton() {
+    const button = document.getElementById('btnFinishSentence');
+    if (button) {
+        button.disabled = collectedSignCount === 0 &&
+            !(sessionActive && isInputActive && currentInputMode === 'sign');
+    }
+}
+
 // ================================================================
 //  STT — Speech to Text (Web Speech API)
 // ================================================================
@@ -728,7 +723,7 @@ document.addEventListener('keydown', (e) => {
 // ================================================================
 
 function handleProcessedMessage(data) {
-    const { original_text, processed_text, source, outputs } = data;
+    const { original_text, processed_text, source, outputs, llm_used } = data;
 
     // Remove welcome message if present
     const welcome = document.querySelector('.conv-welcome');
@@ -737,7 +732,7 @@ function handleProcessedMessage(data) {
     const area = document.getElementById('conversationArea');
 
     // Source label
-    const sourceLabels = { sign: '🤟 Sign', speech: '🎤 Speech', text: '⌨️ Text' };
+    const sourceLabels = { sign: 'Sign', speech: 'Speech', text: 'Text' };
     const sourceLabel = sourceLabels[source] || source;
 
     // Create message card
@@ -748,15 +743,14 @@ function handleProcessedMessage(data) {
         <div class="conv-original">${escapeHtml(original_text)}</div>
         ${processed_text !== original_text
             ? `<div class="conv-processed">
-                 <span class="conv-processed-label">✨ AI Processed:</span>
+                 <span class="conv-processed-label">${llm_used ? 'AI-formed sentence:' : 'Fallback text:'}</span>
                  ${escapeHtml(processed_text)}
                </div>`
             : ''
         }
         <div class="conv-outputs">
-            ${outputs.show_text ? '<span class="conv-out-badge text">📝 Text</span>' : ''}
-            ${outputs.speak_text ? '<span class="conv-out-badge tts">🔊 Spoken</span>' : ''}
-            ${outputs.show_avatar ? '<span class="conv-out-badge avatar">🤟 Signed</span>' : ''}
+            ${outputs.show_text ? '<span class="conv-out-badge text">Text</span>' : ''}
+            ${outputs.speak_text ? '<span class="conv-out-badge tts">Spoken</span>' : ''}
         </div>
     `;
     area.appendChild(msg);
@@ -767,10 +761,6 @@ function handleProcessedMessage(data) {
         speakText(outputs.tts_text);
     }
 
-    // Avatar Output
-    if (outputs.show_avatar && outputs.avatar_glosses) {
-        showSignAvatar(outputs.avatar_glosses);
-    }
 }
 
 // ================================================================
@@ -799,287 +789,6 @@ function speakText(text) {
     };
 
     speechSynthesis.speak(utterance);
-}
-
-// ================================================================
-//  Sign Avatar — Animated Signing Display
-// ================================================================
-
-// Global Avatar Animation State
-let avatarAnimFrame = null;
-let avatarGlossesQueue = [];
-let avatarCurrentIndex = 0;
-let avatarStartTime = 0;
-
-function showSignAvatar(glosses) {
-    const panel = document.getElementById('avatarPanel');
-    if (!glosses || glosses.length === 0) return;
-
-    panel.classList.remove('hidden');
-    avatarGlossesQueue = glosses;
-    avatarCurrentIndex = 0;
-    avatarStartTime = performance.now();
-
-    if (avatarAnimFrame) {
-        cancelAnimationFrame(avatarAnimFrame);
-    }
-
-    runAvatarAnimationLoop();
-}
-
-function runAvatarAnimationLoop() {
-    const canvas = document.getElementById('avatarCanvas');
-    const glossDisplay = document.getElementById('avatarGloss');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-
-    const durationPerGloss = 1800; // 1.8s per word animation
-    const now = performance.now();
-    const elapsed = now - avatarStartTime;
-
-    const currentGlossIdx = Math.floor(elapsed / durationPerGloss);
-
-    if (currentGlossIdx < avatarGlossesQueue.length) {
-        const currentGloss = avatarGlossesQueue[currentGlossIdx];
-        const progressInGloss = (elapsed % durationPerGloss) / durationPerGloss;
-
-        if (glossDisplay) {
-            glossDisplay.innerHTML = `<span class="gloss-word">${currentGloss.toUpperCase()}</span> <span class="gloss-counter">(${currentGlossIdx + 1}/${avatarGlossesQueue.length})</span>`;
-        }
-
-        renderAvatarFrame(ctx, canvas.width, canvas.height, currentGloss, progressInGloss);
-        avatarAnimFrame = requestAnimationFrame(runAvatarAnimationLoop);
-    } else {
-        // Animation completed — return to relaxed rest pose
-        const lastGloss = avatarGlossesQueue[avatarGlossesQueue.length - 1];
-        if (glossDisplay) {
-            glossDisplay.innerHTML = `<span class="gloss-word">${lastGloss.toUpperCase()}</span> <span class="gloss-done">✓ Done</span>`;
-        }
-        renderAvatarFrame(ctx, canvas.width, canvas.height, 'rest', 1.0);
-    }
-}
-
-// Keyframe pose generator for ASL gloss gestures
-function getAvatarJointAngles(gloss, t) {
-    // t ranges 0 to 1
-    // Smooth sinusoidal ease in and out:
-    const ease = Math.sin(t * Math.PI);
-
-    // Default rest pose (arms naturally relaxed at sides/waist)
-    let leftShoulder = 0.3;
-    let leftElbow = 0.5;
-    let rightShoulder = -0.3;
-    let rightElbow = -0.5;
-    let handGesture = 'open';
-
-    const g = gloss.toLowerCase();
-
-    if (g === 'drink' || g === 'water') {
-        // Right hand moves up to mouth with cup shape
-        rightShoulder = -0.3 - 1.2 * ease;
-        rightElbow = -0.5 - 1.0 * ease;
-        handGesture = 'cup';
-    } else if (g === 'eat' || g === 'food') {
-        // Right hand fingertips touch mouth twice
-        const bob = Math.sin(t * Math.PI * 4);
-        rightShoulder = -1.3 + bob * 0.2;
-        rightElbow = -1.4 + bob * 0.2;
-        handGesture = 'pinch';
-    } else if (g === 'book') {
-        // Both palms come together, then open like pages
-        const open = Math.sin(t * Math.PI * 2);
-        leftShoulder = 0.8 + open * 0.3;
-        leftElbow = 1.0;
-        rightShoulder = -0.8 - open * 0.3;
-        rightElbow = -1.0;
-        handGesture = 'flat';
-    } else if (g === 'help') {
-        // Left hand flat palm up, right fist lifts up on top
-        leftShoulder = 0.7;
-        leftElbow = 0.9;
-        rightShoulder = -0.7 - ease * 0.4;
-        rightElbow = -0.9 - ease * 0.4;
-        handGesture = 'fist';
-    } else if (g === 'yes') {
-        // Right fist nods up and down
-        const nod = Math.sin(t * Math.PI * 6);
-        rightShoulder = -0.9;
-        rightElbow = -1.2 + nod * 0.3;
-        handGesture = 'fist';
-    } else if (g === 'no') {
-        // Right hand snaps fingers
-        rightShoulder = -0.9;
-        rightElbow = -1.1;
-        handGesture = 'snap';
-    } else if (g === 'fine' || g === 'hello') {
-        // Right hand waves near temple/chest
-        const wave = Math.sin(t * Math.PI * 6) * 0.25;
-        rightShoulder = -1.4 + wave;
-        rightElbow = -1.5;
-        handGesture = 'wave';
-    } else if (g === 'want') {
-        // Both hands reach forward and pull back
-        const pull = ease * 0.5;
-        leftShoulder = 0.6 + pull;
-        leftElbow = 0.7 - pull;
-        rightShoulder = -0.6 - pull;
-        rightElbow = -0.7 + pull;
-        handGesture = 'claw';
-    } else {
-        // Dynamic procedural signing based on word characters
-        const hash = g.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-        const cycle = Math.sin(t * Math.PI * 2);
-        const sym = (hash % 2 === 0);
-
-        rightShoulder = -0.8 - ease * ((hash % 50) / 100);
-        rightElbow = -0.9 + cycle * 0.3;
-        if (sym) {
-            leftShoulder = 0.8 + ease * (((hash * 3) % 50) / 100);
-            leftElbow = 0.9 - cycle * 0.3;
-        }
-    }
-
-    return { leftShoulder, leftElbow, rightShoulder, rightElbow, handGesture };
-}
-
-function renderAvatarFrame(ctx, w, h, gloss, progress) {
-    ctx.clearRect(0, 0, w, h);
-
-    // 1. Sleek Background with subtle studio gradient
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, h);
-    bgGrad.addColorStop(0, '#0f172a');
-    bgGrad.addColorStop(1, '#020617');
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, w, h);
-
-    // Subtle grid/pedestal glow
-    ctx.beginPath();
-    ctx.ellipse(w / 2, h - 25, 70, 15, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
-    ctx.fill();
-
-    const cx = w / 2;
-    const cy = h * 0.36;
-
-    // Get smooth angles
-    const angles = getAvatarJointAngles(gloss, progress);
-
-    // 2. Torso & Clothes (Stylized modern 3D-effect aesthetic)
-    ctx.fillStyle = '#1e293b';
-    ctx.strokeStyle = '#38bdf8';
-    ctx.lineWidth = 2;
-
-    // Torso path
-    ctx.beginPath();
-    ctx.moveTo(cx - 28, cy + 30);
-    ctx.lineTo(cx + 28, cy + 30);
-    ctx.lineTo(cx + 22, cy + 85);
-    ctx.lineTo(cx - 22, cy + 85);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Neck
-    ctx.fillStyle = '#fbcfe8';
-    ctx.fillRect(cx - 6, cy + 12, 12, 20);
-
-    // 3. Head & Face
-    // Head shape
-    ctx.beginPath();
-    ctx.arc(cx, cy, 20, 0, Math.PI * 2);
-    ctx.fillStyle = '#fed7aa';
-    ctx.fill();
-    ctx.strokeStyle = '#f97316';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Hair
-    ctx.beginPath();
-    ctx.arc(cx, cy - 4, 21, Math.PI, 0);
-    ctx.fillStyle = '#334155';
-    ctx.fill();
-
-    // Eyes
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.arc(cx - 7, cy - 2, 2.5, 0, Math.PI * 2);
-    ctx.arc(cx + 7, cy - 2, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Friendly Smile
-    ctx.strokeStyle = '#c2410c';
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    ctx.arc(cx, cy + 4, 7, 0.15 * Math.PI, 0.85 * Math.PI);
-    ctx.stroke();
-
-    // 4. Arms & Hands with forward kinematics
-    const upperArmLen = 28;
-    const foreArmLen = 28;
-
-    // Left Arm (Screen Left)
-    const lShoulderX = cx - 28;
-    const lShoulderY = cy + 30;
-    const lElbowX = lShoulderX - Math.sin(angles.leftShoulder) * upperArmLen;
-    const lElbowY = lShoulderY + Math.cos(angles.leftShoulder) * upperArmLen;
-    const lHandX = lElbowX - Math.sin(angles.leftShoulder + angles.leftElbow) * foreArmLen;
-    const lHandY = lElbowY + Math.cos(angles.leftShoulder + angles.leftElbow) * foreArmLen;
-
-    // Right Arm (Screen Right)
-    const rShoulderX = cx + 28;
-    const rShoulderY = cy + 30;
-    const rElbowX = rShoulderX + Math.sin(angles.rightShoulder) * upperArmLen;
-    const rElbowY = rShoulderY + Math.cos(angles.rightShoulder) * upperArmLen;
-    const rHandX = rElbowX + Math.sin(angles.rightShoulder + angles.rightElbow) * foreArmLen;
-    const rHandY = rElbowY + Math.cos(angles.rightShoulder + angles.rightElbow) * foreArmLen;
-
-    // Draw Left Arm
-    ctx.strokeStyle = '#38bdf8';
-    ctx.lineWidth = 6;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(lShoulderX, lShoulderY);
-    ctx.lineTo(lElbowX, lElbowY);
-    ctx.lineTo(lHandX, lHandY);
-    ctx.stroke();
-
-    // Left Hand
-    ctx.fillStyle = '#fed7aa';
-    ctx.beginPath();
-    ctx.arc(lHandX, lHandY, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#0284c7';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Draw Right Arm
-    ctx.strokeStyle = '#f43f5e';
-    ctx.lineWidth = 6;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(rShoulderX, rShoulderY);
-    ctx.lineTo(rElbowX, rElbowY);
-    ctx.lineTo(rHandX, rHandY);
-    ctx.stroke();
-
-    // Right Hand
-    ctx.fillStyle = '#fed7aa';
-    ctx.beginPath();
-    ctx.arc(rHandX, rHandY, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#e11d48';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Active Signing Ripple Effect on hands
-    if (gloss !== 'rest') {
-        const pulse = (Math.sin(progress * Math.PI * 4) + 1) * 3;
-        ctx.strokeStyle = 'rgba(74, 222, 128, 0.6)';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(rHandX, rHandY, 8 + pulse, 0, Math.PI * 2);
-        ctx.stroke();
-    }
 }
 
 // ================================================================

@@ -1,6 +1,11 @@
 # Virtual Environment
 asl/
 
+# Local secrets and environment settings
+.env
+.env.*
+!.env.example
+
 # Python cache
 __pycache__/
 *.pyc

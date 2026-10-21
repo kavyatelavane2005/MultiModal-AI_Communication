@@ -7,6 +7,7 @@ and normalizes the 54 keypoints for SPOTER inference.
 from collections import deque
 import numpy as np
 import torch
+import time
 
 from .keypoint_mapper import KeypointMapper
 
@@ -41,6 +42,7 @@ class FrameBuffer:
         self.motion_stop_threshold = 0.006
         self.cooldown_frames = 10
         self.cooldown_counter = 0
+        self.last_frame_time = None
 
         # Minimum frames for a valid sign (filters out accidental twitches)
         self.min_sign_frames = 15
@@ -53,6 +55,7 @@ class FrameBuffer:
         Args:
             keypoints: numpy array of shape (54, 2).
         """
+        self.last_frame_time = time.monotonic()
         velocity = self._calculate_velocity(keypoints)
         self.velocity_history.append(velocity)
         avg_velocity = np.mean(self.velocity_history) if self.velocity_history else 0.0
@@ -131,6 +134,39 @@ class FrameBuffer:
         """Check if sign sequence is complete."""
         return self._prediction_ready and len(self.buffer) >= self.min_sign_frames
 
+    def is_sign_in_progress(self):
+        """Whether the motion segmenter is currently collecting a sign."""
+        return self.state in (SignState.SIGNING, SignState.COOLDOWN)
+
+    def force_finalize(self):
+        """End the current sign clip on an explicit Send sentence action."""
+        if not self.is_sign_in_progress():
+            return False
+
+        self._finalize_sign()
+        return self.is_ready()
+
+    def expire_stale_segment(self, max_gap_sec=6.0):
+        """Discard a partial sign if tracking has stopped for too long.
+
+        This lets sentence sending recover when MediaPipe loses the signer,
+        while avoiding treating an actively captured sign as sentence silence.
+        """
+        if not self.is_sign_in_progress() or self.last_frame_time is None:
+            return False
+
+        if time.monotonic() - self.last_frame_time <= max_gap_sec:
+            return False
+
+        self.buffer = []
+        self.state = SignState.IDLE
+        self.prev_tracked = None
+        self.velocity_history.clear()
+        self.cooldown_counter = 0
+        self._prediction_ready = False
+        self.last_frame_time = None
+        return True
+
     def get_tensor(self):
         """Resamples buffer to exactly num_samples frames and applies sequence normalization.
 
@@ -156,6 +192,7 @@ class FrameBuffer:
         # Reset buffer
         self._prediction_ready = False
         self.buffer = []
+        self.last_frame_time = None
 
         return tensor
 
@@ -177,6 +214,7 @@ class FrameBuffer:
         self.velocity_history.clear()
         self.cooldown_counter = 0
         self._prediction_ready = False
+        self.last_frame_time = None
 
     def __len__(self):
         return len(self.buffer)

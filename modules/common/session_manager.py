@@ -18,10 +18,10 @@ INPUT_MODES = {
 
 # Output modalities based on receiver role
 OUTPUT_MODES = {
-    'deaf':   ['text', 'avatar'],        # Can't hear → text display + sign avatar
+    'deaf':   ['text'],                  # Can't hear → text display
     'blind':  ['tts'],                   # Can't see → voice only (auto-read)
     'mute':   ['text', 'tts'],           # Can hear + see → text + voice
-    'normal': ['text', 'tts', 'avatar']  # All outputs
+    'normal': ['text', 'tts']            # Text and voice outputs
 }
 
 
