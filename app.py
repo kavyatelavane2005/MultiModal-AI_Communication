@@ -3,7 +3,7 @@
 Implements the full workflow:
   1. Session Setup — User A & B select roles (Deaf/Blind/Mute/Normal)
   2. Input Acquisition — Sign language, Speech, Text
-  3. Recognition — MediaPipe + SPOTER for sign, Web Speech API for speech
+  3. Recognition — MediaPipe + TGCN for sign, Web Speech API for speech
   4. Text Common Layer — Unified text representation
   5. LLM Processing — Grammar, sentences, intent, context
   6. Output Decision — Route based on User B's profile
@@ -26,7 +26,7 @@ from flask_socketio import SocketIO, emit
 from modules.slr.pose_estimator import PoseEstimator
 from modules.slr.keypoint_mapper import KeypointMapper
 from modules.slr.frame_buffer import FrameBuffer
-from modules.slr.spoter_inference import SPOTERInference
+from modules.slr.tgcn_inference import TGCNInference
 from modules.slr.sentence_builder import SentenceBuilder
 from modules.llm.translator import ASLTranslator
 from modules.common.session_manager import Session
@@ -34,7 +34,7 @@ from modules.common.text_layer import TextCommonLayer
 from modules.common.output_router import OutputRouter
 from config.settings import (
     MODEL_CHECKPOINT_PATH, ASL100_GLOSSES,
-    NUM_SAMPLES, NUM_KEYPOINTS, HIDDEN_DIM, NUM_CLASSES,
+    NUM_SAMPLES, NUM_CLASSES, HIDDEN_SIZE, NUM_STAGES, DROP_P,
     DEVICE, CONFIDENCE_THRESHOLD
 )
 
@@ -46,7 +46,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 # ---- Global SLR Components (initialized once at startup) ----
 pose_estimator = None
 keypoint_mapper = None
-spoter = None
+tgcn = None
+tgcn_error = None
 translator = None
 
 # ---- Per-Session State ----
@@ -61,24 +62,32 @@ slr_active = False      # Whether SLR camera is streaming
 
 def init_models():
     """Initialize ML models (done once at startup)."""
-    global pose_estimator, keypoint_mapper, spoter, translator
+    global pose_estimator, keypoint_mapper, tgcn, tgcn_error, translator
 
     print("Loading ML models...")
     pose_estimator = PoseEstimator()
     keypoint_mapper = KeypointMapper()
 
-    spoter = SPOTERInference(
-        checkpoint_path=MODEL_CHECKPOINT_PATH,
-        gloss_list=ASL100_GLOSSES,
-        num_samples=NUM_SAMPLES,
-        num_keypoints=NUM_KEYPOINTS,
-        hidden_dim=HIDDEN_DIM,
-        num_classes=NUM_CLASSES,
-        device=DEVICE
-    )
+    try:
+        tgcn = TGCNInference(
+            checkpoint_path=MODEL_CHECKPOINT_PATH,
+            gloss_list=ASL100_GLOSSES,
+            num_samples=NUM_SAMPLES,
+            hidden_size=HIDDEN_SIZE,
+            num_classes=NUM_CLASSES,
+            num_stages=NUM_STAGES,
+            drop_p=DROP_P,
+            device=DEVICE,
+        )
+        tgcn_error = None
+    except Exception as error:
+        # Keep text and speech modes available if the TGCN checkpoint is absent.
+        tgcn = None
+        tgcn_error = str(error)
+        print(f"Sign recognition unavailable: {tgcn_error}")
 
     translator = ASLTranslator()
-    print("ML models loaded!")
+    print("ML services initialized!")
 
 
 def init_session_components():
@@ -103,7 +112,9 @@ def index():
 def status():
     """Return system status."""
     return jsonify({
-        'models_ready': spoter is not None,
+        'models_ready': tgcn is not None,
+        'slr_model': 'TGCN WLASL-100',
+        'model_error': tgcn_error,
         'session_active': session is not None and session.active,
         'llm_configured': bool(translator and translator.api_key),
         'glosses': ASL100_GLOSSES,
@@ -129,6 +140,8 @@ def handle_connect():
             'text': 'Gemini API key is not configured. Add GEMINI_API_KEY to your local .env file and restart the app.',
             'type': 'info'
         })
+    if tgcn_error:
+        emit('system_message', {'text': tgcn_error, 'type': 'error'})
 
 
 @socketio.on('disconnect')
@@ -218,6 +231,12 @@ def handle_start_slr():
     if not session or not session.active:
         emit('system_message', {'text': 'Please start a session first', 'type': 'error'})
         return
+    if tgcn is None:
+        emit('system_message', {
+            'text': tgcn_error or 'TGCN WLASL-100 weights are not loaded.',
+            'type': 'error'
+        })
+        return
 
     slr_active = True
     with sentence_lock:
@@ -247,7 +266,7 @@ def handle_video_frame(data):
     """
     global slr_active
 
-    if not slr_active or spoter is None or not session or not session.active:
+    if not slr_active or tgcn is None or not session or not session.active:
         return {'processed': False}
 
     try:
@@ -266,7 +285,7 @@ def handle_video_frame(data):
         stale_segment_discarded = False
 
         # Serialize capture, prediction, and flush decisions. In particular,
-        # a Send click cannot flush between get_tensor() and adding its gloss.
+        # a Send click cannot flush between prediction and adding its gloss.
         with sentence_lock:
             stale_segment_discarded = frame_buffer.expire_stale_segment()
             sign_was_in_progress = frame_buffer.is_sign_in_progress()
@@ -288,8 +307,8 @@ def handle_video_frame(data):
             fill = frame_buffer.get_fill_ratio()
 
             if frame_buffer.is_ready():
-                input_tensor = frame_buffer.get_tensor()
-                prediction = spoter.predict(input_tensor)
+                input_tensor = frame_buffer.get_tgcn_tensor()
+                prediction = tgcn.predict(input_tensor)
 
                 if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
                     gloss = prediction['gloss']
@@ -355,10 +374,10 @@ def handle_finish_sentence():
 
         # An explicit Send action marks the end of the current sign as well.
         # Predict it before flushing so the last sign is not left in the buffer.
-        if active_sign_finalized:
+        if active_sign_finalized and tgcn is not None:
             frame_buffer.force_finalize()
             if frame_buffer.is_ready():
-                prediction = spoter.predict(frame_buffer.get_tensor())
+                prediction = tgcn.predict(frame_buffer.get_tgcn_tensor())
                 if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
                     gloss = prediction['gloss']
                     text_layer.add_sign_gloss(gloss)

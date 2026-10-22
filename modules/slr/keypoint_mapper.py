@@ -1,65 +1,67 @@
-"""Keypoint Mapper for SPOTER: MediaPipe landmarks -> SPOTER 54-keypoint format.
+"""Map MediaPipe landmarks into the WLASL TGCN 55-point capture format.
 
-SPOTER expects 54 keypoints (108 features per frame):
-  - 12 upper body keypoints
+The capture format contains 55 keypoints (110 coordinates per frame):
+  - 13 upper body keypoints
   - 21 left hand keypoints
   - 21 right hand keypoints
 
-Body Keypoints (Indices 0..11):
+Body Keypoints (Indices 0..12):
   0: Nose (MediaPipe 0)
   1: Neck (Midpoint of MediaPipe Left Shoulder 11 & Right Shoulder 12)
-  2: Right Eye (MediaPipe 5)
-  3: Left Eye (MediaPipe 2)
-  4: Right Ear (MediaPipe 8)
-  5: Left Ear (MediaPipe 7)
-  6: Right Shoulder (MediaPipe 12)
-  7: Left Shoulder (MediaPipe 11)
-  8: Right Elbow (MediaPipe 14)
-  9: Left Elbow (MediaPipe 13)
-  10: Right Wrist (MediaPipe 16)
-  11: Left Wrist (MediaPipe 15)
+  2: Right Shoulder (MediaPipe 12)
+  3: Right Elbow (MediaPipe 14)
+  4: Right Wrist (MediaPipe 16)
+  5: Left Shoulder (MediaPipe 11)
+  6: Left Elbow (MediaPipe 13)
+  7: Left Wrist (MediaPipe 15)
+  8: MidHip (midpoint of MediaPipe 23 and 24)
+  9: Right Eye (MediaPipe 5)
+  10: Left Eye (MediaPipe 2)
+  11: Right Ear (MediaPipe 8)
+  12: Left Ear (MediaPipe 7)
 
 Hand Keypoints:
-  12..32: 21 Left Hand Keypoints (MediaPipe landmarks 0..20)
-  33..53: 21 Right Hand Keypoints (MediaPipe landmarks 0..20)
+  13..33: 21 Left Hand Keypoints (MediaPipe landmarks 0..20)
+  34..54: 21 Right Hand Keypoints (MediaPipe landmarks 0..20)
 """
 import numpy as np
 
 
-# MediaPipe mapping to SPOTER 12 body keypoints
+# MediaPipe mapping to the 13 upper-body points in the TGCN input order.
 BODY_MAPPING = {
     0: [0],        # Nose
     1: [11, 12],   # Neck = midpoint of left & right shoulders
-    2: [5],        # Right Eye
-    3: [2],        # Left Eye
-    4: [8],        # Right Ear
-    5: [7],        # Left Ear
-    6: [12],       # Right Shoulder
-    7: [11],       # Left Shoulder
-    8: [14],       # Right Elbow
-    9: [13],       # Left Elbow
-    10: [16],      # Right Wrist
-    11: [15]       # Left Wrist
+    2: [12],       # Right Shoulder
+    3: [14],       # Right Elbow
+    4: [16],       # Right Wrist
+    5: [11],       # Left Shoulder
+    6: [13],       # Left Elbow
+    7: [15],       # Left Wrist
+    8: [23, 24],   # MidHip = midpoint of left & right hips
+    9: [5],        # Right Eye
+    10: [2],       # Left Eye
+    11: [8],       # Right Ear
+    12: [7]        # Left Ear
 }
 
 
 class KeypointMapper:
-    """Maps MediaPipe landmarks to SPOTER 54-keypoint format and normalizes sequences."""
+    """Map MediaPipe landmarks to the 55-point order used by TGCN."""
 
     def __init__(self):
-        self.num_body_keypoints = 12
+        self.num_body_keypoints = 13
         self.num_hand_keypoints = 21
-        self.total_keypoints = 54  # 12 body + 21 left hand + 21 right hand
+        self.total_keypoints = 55  # 13 body + 21 left hand + 21 right hand
 
     def map_landmarks(self, landmarks_dict):
-        """Convert a single frame of MediaPipe landmarks to SPOTER 54-keypoint array.
+        """Convert a frame of MediaPipe landmarks to the TGCN 55-keypoint array.
 
         Args:
             landmarks_dict: dict with keys 'body', 'left_hand', 'right_hand',
                            each containing (N, 2) array of coordinates in [0, 1] range.
 
         Returns:
-            numpy array of shape (54, 2) in [0, 1] range, or None if body is missing.
+            numpy array of shape (55, 2) in [-1, 1] range, or None if body is missing.
         """
         body = landmarks_dict.get('body')
         left_hand = landmarks_dict.get('left_hand')
@@ -68,13 +70,13 @@ class KeypointMapper:
         if body is None:
             return None
 
-        # 1. Map 12 body landmarks
+        # 1. Map the 13 upper-body landmarks used by the TGCN checkpoint.
         body_mapped = np.zeros((self.num_body_keypoints, 2), dtype=np.float32)
-        for spoter_idx, mp_indices in BODY_MAPPING.items():
+        for body_idx, mp_indices in BODY_MAPPING.items():
             if len(mp_indices) == 1:
-                body_mapped[spoter_idx] = body[mp_indices[0]]
+                body_mapped[body_idx] = body[mp_indices[0]]
             else:
-                body_mapped[spoter_idx] = np.mean(body[mp_indices], axis=0)
+                body_mapped[body_idx] = np.mean(body[mp_indices], axis=0)
 
         # 2. Map 21 left hand landmarks
         if left_hand is not None:
@@ -88,13 +90,18 @@ class KeypointMapper:
         else:
             right_mapped = np.zeros((self.num_hand_keypoints, 2), dtype=np.float32)
 
-        # 4. Concatenate: (12 body) + (21 left hand) + (21 right hand) = 54
-        keypoints_54 = np.concatenate([body_mapped, left_mapped, right_mapped], axis=0)
-        return keypoints_54
+        # 4. Concatenate: (13 body) + (21 left hand) + (21 right hand) = 55.
+        keypoints_55 = np.concatenate([body_mapped, left_mapped, right_mapped], axis=0)
+        # The TGCN training pipeline scales normalized MediaPipe coordinates
+        # from [0, 1] to [-1, 1].
+        return 2.0 * keypoints_55 - 1.0
 
     @staticmethod
     def normalize_sequence(sequence):
-        """Normalizes a sequence of 54 keypoints following the Bohacek normalization algorithm.
+        """Apply legacy SPOTER normalization to a 54-keypoint sequence.
+
+        The active TGCN path consumes the per-frame [-1, 1] coordinates
+        directly; this helper is retained only for the inactive SPOTER path.
 
         Args:
             sequence: numpy array of shape (T, 54, 2) where T is the sequence length.

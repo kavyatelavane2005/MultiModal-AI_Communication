@@ -151,7 +151,7 @@ def main():
             # Draw landmarks on frame
             draw_landmarks_on_frame(frame, landmarks)
 
-            # Map to 55 WLASL keypoints
+            # Map to the TGCN checkpoint's 55 WLASL keypoints
             keypoints = keypoint_mapper.map_landmarks(landmarks)
 
             if keypoints is not None:
@@ -159,7 +159,7 @@ def main():
 
             # Run prediction if buffer is ready
             if frame_buffer.is_ready():
-                input_tensor = frame_buffer.get_tensor()
+                input_tensor = frame_buffer.get_tgcn_tensor()
                 prediction = tgcn.predict(input_tensor)
 
                 if prediction['confidence'] >= CONFIDENCE_THRESHOLD:

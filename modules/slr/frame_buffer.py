@@ -1,15 +1,13 @@
-"""Smart Frame Buffer with Motion-Based Sign Segmentation for SPOTER.
+"""Smart Frame Buffer with motion-based sign segmentation.
 
 Tracks wrist and fingertip velocities to segment signs from continuous video.
-When a sign ends, it resamples the frames to exactly num_samples (50 frames)
-and normalizes the 54 keypoints for SPOTER inference.
+When a sign ends, it resamples the frames to exactly num_samples frames.
+TGCN inference uses the model's (1, 55, 100) input layout.
 """
 from collections import deque
 import numpy as np
 import torch
 import time
-
-from .keypoint_mapper import KeypointMapper
 
 
 class SignState:
@@ -20,17 +18,17 @@ class SignState:
 
 
 class FrameBuffer:
-    """Motion-aware frame buffer for SPOTER sign language recognition."""
+    """Motion-aware frame buffer for the active TGCN sign-recognition path."""
 
-    def __init__(self, num_samples=50, num_keypoints=54):
+    def __init__(self, num_samples=50, num_keypoints=55):
         """
         Args:
-            num_samples: Number of frames per sign gesture (50 for SPOTER).
-            num_keypoints: 54 keypoints (12 body + 21 left hand + 21 right hand).
+            num_samples: Number of frames sampled for each completed sign.
+            num_keypoints: 55 keypoints (13 body + 21 left hand + 21 right hand).
         """
         self.num_samples = num_samples
         self.num_keypoints = num_keypoints
-        self.buffer = []  # List of (54, 2) arrays
+        self.buffer = []  # List of (55, 2) arrays
 
         # ---- Motion Detection State Machine ----
         self.state = SignState.IDLE
@@ -38,8 +36,10 @@ class FrameBuffer:
         self.velocity_history = deque(maxlen=5)
 
         # Thresholds tuned for MediaPipe coordinates
-        self.motion_start_threshold = 0.012
-        self.motion_stop_threshold = 0.006
+        # KeypointMapper scales coordinates to [-1, 1], so retain the same
+        # effective motion thresholds used with the former [0, 1] coordinates.
+        self.motion_start_threshold = 0.024
+        self.motion_stop_threshold = 0.012
         self.cooldown_frames = 10
         self.cooldown_counter = 0
         self.last_frame_time = None
@@ -53,7 +53,7 @@ class FrameBuffer:
         """Add a single frame's keypoints with motion detection.
 
         Args:
-            keypoints: numpy array of shape (54, 2).
+            keypoints: numpy array of shape (55, 2).
         """
         self.last_frame_time = time.monotonic()
         velocity = self._calculate_velocity(keypoints)
@@ -90,33 +90,54 @@ class FrameBuffer:
         self._update_prev_tracked(keypoints)
 
     def _calculate_velocity(self, keypoints):
-        """Calculate combined velocity of wrists (indices 10, 11) and middle fingertips (indices 24, 45)."""
+        """Calculate velocity of TGCN wrists (4, 7) and middle fingertips (25, 46)."""
         if self.prev_tracked is None:
             return 0.0
 
-        # Body 10: Right Wrist, Body 11: Left Wrist
-        r_wrist = keypoints[10]
-        l_wrist = keypoints[11]
-        r_wrist_vel = np.linalg.norm(r_wrist - self.prev_tracked[0]) if not np.all(r_wrist == 0) else 0.0
-        l_wrist_vel = np.linalg.norm(l_wrist - self.prev_tracked[1]) if not np.all(l_wrist == 0) else 0.0
+        # TGCN body 4: Right Wrist, body 7: Left Wrist
+        r_wrist = keypoints[4]
+        l_wrist = keypoints[7]
+        r_wrist_vel = (
+            np.linalg.norm(r_wrist - self.prev_tracked[0])
+            if self._point_is_visible(r_wrist) and self._point_is_visible(self.prev_tracked[0])
+            else 0.0
+        )
+        l_wrist_vel = (
+            np.linalg.norm(l_wrist - self.prev_tracked[1])
+            if self._point_is_visible(l_wrist) and self._point_is_visible(self.prev_tracked[1])
+            else 0.0
+        )
         wrist_vel = (r_wrist_vel + l_wrist_vel) / 2.0
 
-        # Hand Middle Fingertips: 12 + 12 = 24 (Left), 33 + 12 = 45 (Right)
-        l_finger = keypoints[24]
-        r_finger = keypoints[45]
-        l_finger_vel = np.linalg.norm(l_finger - self.prev_tracked[2]) if not np.all(l_finger == 0) else 0.0
-        r_finger_vel = np.linalg.norm(r_finger - self.prev_tracked[3]) if not np.all(r_finger == 0) else 0.0
+        # Hand Middle Fingertips: 13 + 12 = 25 (Left), 34 + 12 = 46 (Right)
+        l_finger = keypoints[25]
+        r_finger = keypoints[46]
+        l_finger_vel = (
+            np.linalg.norm(l_finger - self.prev_tracked[2])
+            if self._point_is_visible(l_finger) and self._point_is_visible(self.prev_tracked[2])
+            else 0.0
+        )
+        r_finger_vel = (
+            np.linalg.norm(r_finger - self.prev_tracked[3])
+            if self._point_is_visible(r_finger) and self._point_is_visible(self.prev_tracked[3])
+            else 0.0
+        )
         finger_vel = (r_finger_vel + l_finger_vel) / 2.0
 
         return max(wrist_vel, finger_vel)
 
+    @staticmethod
+    def _point_is_visible(point):
+        """In the [-1, 1] TGCN representation, absent points are (-1, -1)."""
+        return not np.all(point == -1.0)
+
     def _update_prev_tracked(self, keypoints):
         """Cache current positions for velocity calculation."""
         self.prev_tracked = np.array([
-            keypoints[10].copy(),  # Right wrist
-            keypoints[11].copy(),  # Left wrist
-            keypoints[24].copy(),  # Left middle fingertip
-            keypoints[45].copy(),  # Right middle fingertip
+            keypoints[4].copy(),   # Right wrist
+            keypoints[7].copy(),   # Left wrist
+            keypoints[25].copy(),  # Left middle fingertip
+            keypoints[46].copy(),  # Right middle fingertip
         ])
 
     def _finalize_sign(self):
@@ -167,34 +188,55 @@ class FrameBuffer:
         self.last_frame_time = None
         return True
 
-    def get_tensor(self):
-        """Resamples buffer to exactly num_samples frames and applies sequence normalization.
-
-        Returns:
-            torch.Tensor of shape (50, 54, 2) ready for SPOTER.
-        """
+    def _resample_sequence(self):
+        """Uniformly resample the finalized clip without model-specific normalization."""
         if not self.is_ready():
             return None
 
         captured = self.buffer
-        n_captured = len(captured)
+        indices = np.linspace(0, len(captured) - 1, self.num_samples, dtype=int)
+        return np.stack([captured[index] for index in indices], axis=0)
 
-        # Uniform temporal sampling
-        indices = np.linspace(0, n_captured - 1, self.num_samples, dtype=int)
-        frames = [captured[i] for i in indices]
-        stacked = np.stack(frames, axis=0)  # (50, 54, 2)
-
-        # Apply Bohacek-style sequence normalization
-        normalized = KeypointMapper.normalize_sequence(stacked)
-
-        tensor = torch.FloatTensor(normalized)
-
-        # Reset buffer
+    def _consume_finalized_sequence(self):
         self._prediction_ready = False
         self.buffer = []
         self.last_frame_time = None
 
+    def get_raw_tensor(self):
+        """Return resampled, unnormalized keypoints for model-specific preprocessing.
+
+        Returns:
+            Tensor with shape (num_samples, 55, 2), or None until a sign is ready.
+        """
+        stacked = self._resample_sequence()
+        if stacked is None:
+            return None
+
+        tensor = torch.from_numpy(stacked.astype(np.float32, copy=False))
+        self._consume_finalized_sequence()
         return tensor
+
+    def get_tgcn_tensor(self):
+        """Return the finalized clip in the TGCN checkpoint's exact input layout.
+
+        Input coordinates have already been scaled to [-1, 1] by
+        KeypointMapper. The TGCN expects every keypoint's x/y values interleaved
+        across time: (batch=1, keypoints=55, frames*2=100).
+        """
+        stacked = self._resample_sequence()
+        if stacked is None:
+            return None
+
+        arranged = stacked.transpose(1, 0, 2).reshape(
+            self.num_keypoints, self.num_samples * 2
+        )
+        tensor = torch.from_numpy(arranged.astype(np.float32, copy=False)).unsqueeze(0)
+        self._consume_finalized_sequence()
+        return tensor
+
+    def get_tensor(self):
+        """Return the finalized clip as a TGCN-ready (1, 55, 100) tensor."""
+        return self.get_tgcn_tensor()
 
     def get_fill_ratio(self):
         """Return buffer fill percentage (0.0 to 1.0) for UI."""

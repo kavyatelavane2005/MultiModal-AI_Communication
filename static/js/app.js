@@ -408,7 +408,7 @@ function startSLR() {
             frameInterval = setInterval(() => {
                 if (!isInputActive) return;
                 sendFrame(video);
-            }, 120);
+            }, 60);
         })
         .catch(err => {
             // If exact deviceId failed, fallback to any user-facing camera
@@ -425,7 +425,7 @@ function startSLR() {
                         frameInterval = setInterval(() => {
                             if (!isInputActive) return;
                             sendFrame(video);
-                        }, 120);
+                        }, 60);
                     })
                     .catch(e => {
                         addLog('Camera access denied: ' + e.message, 'error');
