@@ -52,6 +52,7 @@ class KeypointMapper:
         self.num_body_keypoints = 13
         self.num_hand_keypoints = 21
         self.total_keypoints = 55  # 13 body + 21 left hand + 21 right hand
+        self.min_body_visibility = 0.35
 
     def map_landmarks(self, landmarks_dict):
         """Convert a frame of MediaPipe landmarks to the TGCN 55-keypoint array.
@@ -64,6 +65,7 @@ class KeypointMapper:
             numpy array of shape (55, 2) in [-1, 1] range, or None if body is missing.
         """
         body = landmarks_dict.get('body')
+        body_visibility = landmarks_dict.get('body_visibility')
         left_hand = landmarks_dict.get('left_hand')
         right_hand = landmarks_dict.get('right_hand')
 
@@ -71,30 +73,61 @@ class KeypointMapper:
             return None
 
         # 1. Map the 13 upper-body landmarks used by the TGCN checkpoint.
+        # Missing or low-confidence points stay at the model's established
+        # missing-point value (-1, -1) after scaling to [-1, 1].
+        body = np.asarray(body, dtype=np.float32)
+        if body.ndim != 2 or body.shape[0] < 33 or body.shape[1] < 2:
+            return None
+        body = body[:, :2]
+        body_valid = np.all(np.isfinite(body), axis=1)
+        if body_visibility is not None:
+            visibility = np.asarray(body_visibility, dtype=np.float32).reshape(-1)
+            if visibility.size >= body.shape[0]:
+                body_valid &= np.isfinite(visibility[:body.shape[0]])
+                body_valid &= visibility[:body.shape[0]] >= self.min_body_visibility
+
         body_mapped = np.zeros((self.num_body_keypoints, 2), dtype=np.float32)
+        body_mapped_valid = np.zeros(self.num_body_keypoints, dtype=bool)
         for body_idx, mp_indices in BODY_MAPPING.items():
+            # Midpoints are only reliable when both source landmarks are seen.
+            if not np.all(body_valid[mp_indices]):
+                continue
             if len(mp_indices) == 1:
                 body_mapped[body_idx] = body[mp_indices[0]]
             else:
                 body_mapped[body_idx] = np.mean(body[mp_indices], axis=0)
+            body_mapped_valid[body_idx] = True
 
         # 2. Map 21 left hand landmarks
-        if left_hand is not None:
-            left_mapped = left_hand.copy()
-        else:
-            left_mapped = np.zeros((self.num_hand_keypoints, 2), dtype=np.float32)
+        left_mapped, left_valid = self._map_hand(left_hand)
 
         # 3. Map 21 right hand landmarks
-        if right_hand is not None:
-            right_mapped = right_hand.copy()
-        else:
-            right_mapped = np.zeros((self.num_hand_keypoints, 2), dtype=np.float32)
+        right_mapped, right_valid = self._map_hand(right_hand)
 
         # 4. Concatenate: (13 body) + (21 left hand) + (21 right hand) = 55.
         keypoints_55 = np.concatenate([body_mapped, left_mapped, right_mapped], axis=0)
         # The TGCN training pipeline scales normalized MediaPipe coordinates
         # from [0, 1] to [-1, 1].
-        return 2.0 * keypoints_55 - 1.0
+        mapped = 2.0 * keypoints_55 - 1.0
+        point_valid = np.concatenate([body_mapped_valid, left_valid, right_valid])
+        mapped[~point_valid] = -1.0
+        return mapped.astype(np.float32, copy=False)
+
+    def _map_hand(self, hand):
+        """Return exactly 21 valid hand points, using -1 sentinels if absent."""
+        mapped = np.zeros((self.num_hand_keypoints, 2), dtype=np.float32)
+        valid = np.zeros(self.num_hand_keypoints, dtype=bool)
+        if hand is None:
+            return mapped, valid
+
+        hand = np.asarray(hand, dtype=np.float32)
+        if hand.ndim != 2 or hand.shape[0] < self.num_hand_keypoints or hand.shape[1] < 2:
+            return mapped, valid
+
+        hand = hand[:self.num_hand_keypoints, :2]
+        valid = np.all(np.isfinite(hand), axis=1)
+        mapped[valid] = hand[valid]
+        return mapped, valid
 
     @staticmethod
     def normalize_sequence(sequence):

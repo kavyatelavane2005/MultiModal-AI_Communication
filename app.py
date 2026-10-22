@@ -26,6 +26,7 @@ from flask_socketio import SocketIO, emit
 from modules.slr.pose_estimator import PoseEstimator
 from modules.slr.keypoint_mapper import KeypointMapper
 from modules.slr.frame_buffer import FrameBuffer
+from modules.slr.personal_signs import PersonalSignStore, REQUIRED_EXAMPLES
 from modules.slr.tgcn_inference import TGCNInference
 from modules.slr.sentence_builder import SentenceBuilder
 from modules.llm.translator import ASLTranslator
@@ -49,6 +50,7 @@ keypoint_mapper = None
 tgcn = None
 tgcn_error = None
 translator = None
+personal_sign_store = None
 
 # ---- Per-Session State ----
 session = None          # Current Session object
@@ -58,11 +60,12 @@ sentence_lock = threading.Lock()
 text_layer = None       # Text common layer
 output_router = None    # Output decision module
 slr_active = False      # Whether SLR camera is streaming
+personal_sign_enrollment = None
 
 
 def init_models():
     """Initialize ML models (done once at startup)."""
-    global pose_estimator, keypoint_mapper, tgcn, tgcn_error, translator
+    global pose_estimator, keypoint_mapper, tgcn, tgcn_error, translator, personal_sign_store
 
     print("Loading ML models...")
     pose_estimator = PoseEstimator()
@@ -87,6 +90,9 @@ def init_models():
         print(f"Sign recognition unavailable: {tgcn_error}")
 
     translator = ASLTranslator()
+    personal_sign_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       'instance', 'personal_signs.json')
+    personal_sign_store = PersonalSignStore(personal_sign_path)
     print("ML services initialized!")
 
 
@@ -142,12 +148,18 @@ def handle_connect():
         })
     if tgcn_error:
         emit('system_message', {'text': tgcn_error, 'type': 'error'})
+    if personal_sign_store:
+        with sentence_lock:
+            signs = personal_sign_store.list_signs()
+        emit('personal_signs_list', {'signs': signs})
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    global slr_active, session
+    global slr_active, session, personal_sign_enrollment
     slr_active = False
+    with sentence_lock:
+        personal_sign_enrollment = None
     print("Client disconnected")
 
 
@@ -161,7 +173,7 @@ def handle_start_session(data):
     
     Expects: { user_a_role: str, user_b_role: str }
     """
-    global session, output_router, slr_active
+    global session, output_router, slr_active, personal_sign_enrollment
 
     user_a_role = data.get('user_a_role', 'normal').lower()
     user_b_role = data.get('user_b_role', 'normal').lower()
@@ -171,6 +183,7 @@ def handle_start_session(data):
         output_router = OutputRouter(user_b_role)
         init_session_components()
         slr_active = False
+        personal_sign_enrollment = None
         emit('sentence_preview', {'glosses': []})
 
         print(f"Session started: {user_a_role} → {user_b_role}")
@@ -186,11 +199,12 @@ def handle_start_session(data):
 @socketio.on('end_session')
 def handle_end_session():
     """End the current session."""
-    global session, slr_active, output_router
+    global session, slr_active, output_router, personal_sign_enrollment
 
     if session:
         session.end()
     slr_active = False
+    personal_sign_enrollment = None
     output_router = None
     emit('sentence_preview', {'glosses': []})
 
@@ -202,7 +216,7 @@ def handle_end_session():
 @socketio.on('swap_roles')
 def handle_swap_roles():
     """Swap roles between User A and User B (two-way turn)."""
-    global session, output_router, slr_active
+    global session, output_router, slr_active, personal_sign_enrollment
     if not session or not session.active:
         return
 
@@ -210,6 +224,7 @@ def handle_swap_roles():
     output_router = OutputRouter(session.user_b_role)
     init_session_components()
     slr_active = False
+    personal_sign_enrollment = None
     emit('sentence_preview', {'glosses': []})
 
     print(f"Roles swapped: {session.user_a_role} → {session.user_b_role}")
@@ -231,31 +246,55 @@ def handle_start_slr():
     if not session or not session.active:
         emit('system_message', {'text': 'Please start a session first', 'type': 'error'})
         return
-    if tgcn is None:
-        emit('system_message', {
-            'text': tgcn_error or 'TGCN WLASL-100 weights are not loaded.',
-            'type': 'error'
-        })
-        return
 
     slr_active = True
     with sentence_lock:
         if frame_buffer:
             frame_buffer.clear()
+        has_personal_signs = bool(personal_sign_store and personal_sign_store.list_signs())
     emit('slr_status', {'active': True})
+    if tgcn is None and not has_personal_signs:
+        emit('system_message', {
+            'text': 'TGCN weights are unavailable. You can still enroll personal signs in this session.',
+            'type': 'warning'
+        })
     print("SLR started")
 
 
 @socketio.on('stop_slr')
 def handle_stop_slr():
     """Stop sign language recognition."""
-    global slr_active
+    global slr_active, personal_sign_enrollment
     slr_active = False
     with sentence_lock:
+        enrollment_cancelled = personal_sign_enrollment is not None
+        personal_sign_enrollment = None
         if frame_buffer:
             frame_buffer.clear()
     emit('slr_status', {'active': False})
+    if enrollment_cancelled:
+        emit('personal_sign_enrollment_status', {'active': False, 'message': 'Enrollment cancelled because sign capture stopped.'})
     print("SLR stopped")
+
+
+def recognize_sequence(sequence):
+    """Prefer a confident local personal sign, then use the existing TGCN model."""
+    if personal_sign_store:
+        custom = personal_sign_store.match(sequence)
+        if custom:
+            return {
+                'gloss': custom['name'],
+                'output_text': custom['text'],
+                'confidence': custom['confidence'],
+                'is_custom': True,
+                'top5': [(custom['name'], custom['confidence'])],
+            }
+
+    if tgcn is None:
+        return None
+    prediction = tgcn.predict(FrameBuffer.sequence_to_tgcn_tensor(sequence))
+    prediction['is_custom'] = False
+    return prediction
 
 
 @socketio.on('video_frame')
@@ -264,9 +303,9 @@ def handle_video_frame(data):
     
     Expects: { 'image': 'data:image/jpeg;base64,...' }
     """
-    global slr_active
+    global slr_active, personal_sign_enrollment
 
-    if not slr_active or tgcn is None or not session or not session.active:
+    if not slr_active or not session or not session.active:
         return {'processed': False}
 
     try:
@@ -283,6 +322,8 @@ def handle_video_frame(data):
         pending_glosses = None
         sentence = None
         stale_segment_discarded = False
+        enrollment_update = None
+        enrollment_saved = None
 
         # Serialize capture, prediction, and flush decisions. In particular,
         # a Send click cannot flush between prediction and adding its gloss.
@@ -298,7 +339,14 @@ def handle_video_frame(data):
             landmark_data = {}
             for key in ['body', 'left_hand', 'right_hand']:
                 if landmarks[key] is not None:
-                    landmark_data[key] = landmarks[key].tolist()
+                    if key == 'body' and landmarks.get('body_visibility') is not None:
+                        visibility = landmarks['body_visibility']
+                        landmark_data[key] = [
+                            point.tolist() if visibility[index] >= keypoint_mapper.min_body_visibility else None
+                            for index, point in enumerate(landmarks[key])
+                        ]
+                    else:
+                        landmark_data[key] = landmarks[key].tolist()
 
             keypoints = keypoint_mapper.map_landmarks(landmarks)
             if keypoints is not None:
@@ -307,14 +355,43 @@ def handle_video_frame(data):
             fill = frame_buffer.get_fill_ratio()
 
             if frame_buffer.is_ready():
-                input_tensor = frame_buffer.get_tgcn_tensor()
-                prediction = tgcn.predict(input_tensor)
-
-                if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
-                    gloss = prediction['gloss']
-                    text_layer.add_sign_gloss(gloss)
-                    sentence_builder.add_word(gloss)
-                    pending_glosses = list(sentence_builder.words)
+                sequence = frame_buffer.get_raw_sequence()
+                if personal_sign_enrollment is not None:
+                    personal_sign_enrollment['samples'].append(sequence)
+                    count = len(personal_sign_enrollment['samples'])
+                    if count >= REQUIRED_EXAMPLES:
+                        try:
+                            personal_sign_store.add_examples(
+                                personal_sign_enrollment['name'],
+                                personal_sign_enrollment['text'],
+                                personal_sign_enrollment['samples'],
+                            )
+                            enrollment_saved = {
+                                'active': False,
+                                'saved': True,
+                                'name': personal_sign_enrollment['name'],
+                                'text': personal_sign_enrollment['text'],
+                                'count': count,
+                            }
+                            personal_sign_enrollment = None
+                        except (ValueError, OSError) as error:
+                            enrollment_saved = {'active': False, 'saved': False, 'message': str(error)}
+                            personal_sign_enrollment = None
+                    else:
+                        enrollment_update = {
+                            'active': True,
+                            'name': personal_sign_enrollment['name'],
+                            'count': count,
+                            'required': REQUIRED_EXAMPLES,
+                        }
+                    sentence_builder.mark_activity()
+                else:
+                    prediction = recognize_sequence(sequence)
+                    if prediction and prediction['confidence'] >= CONFIDENCE_THRESHOLD:
+                        sentence_text = prediction.get('output_text', prediction['gloss'])
+                        text_layer.add_sign_gloss(sentence_text)
+                        sentence_builder.add_word(sentence_text)
+                        pending_glosses = list(sentence_builder.words)
 
             # A pause flush cannot win while a sign is still being segmented.
             sign_in_progress = frame_buffer.is_sign_in_progress()
@@ -322,7 +399,7 @@ def handle_video_frame(data):
                 # Reset the sentence pause even when this clip was too uncertain
                 # to add as a gloss, so it cannot flush the previous word at once.
                 sentence_builder.mark_activity()
-            if not sign_in_progress:
+            if not sign_in_progress and personal_sign_enrollment is None:
                 sentence = sentence_builder.check_flush()
 
         # Send empty landmark updates too, so tracking loss clears the overlay.
@@ -335,18 +412,33 @@ def handle_video_frame(data):
                 'type': 'warning'
             })
 
+        if enrollment_update:
+            emit('personal_sign_enrollment_status', enrollment_update)
+        if enrollment_saved:
+            emit('personal_sign_enrollment_status', enrollment_saved)
+            if enrollment_saved.get('saved'):
+                emit('personal_signs_list', {'signs': personal_sign_store.list_signs()})
+                emit('system_message', {
+                    'text': f"Personal sign '{enrollment_saved['name']}' saved with {enrollment_saved['count']} examples.",
+                    'type': 'success'
+                })
+            else:
+                emit('system_message', {'text': enrollment_saved.get('message', 'Could not save personal sign.'), 'type': 'error'})
+
         if pending_glosses is not None:
             emit('sentence_preview', {'glosses': pending_glosses})
 
         if prediction and prediction['confidence'] >= CONFIDENCE_THRESHOLD:
-            emit('slr_prediction', {
+            prediction_event = {
                 'gloss': prediction['gloss'],
                 'confidence': round(prediction['confidence'] * 100, 1),
+                'is_custom': bool(prediction.get('is_custom')),
                 'top5': [
                     {'gloss': g, 'confidence': round(c * 100, 1)}
                     for g, c in prediction['top5']
                 ]
-            })
+            }
+            emit('slr_prediction', prediction_event)
 
         if sentence:
             emit('sentence_preview', {'glosses': []})
@@ -359,6 +451,85 @@ def handle_video_frame(data):
     return {'processed': True}
 
 
+@socketio.on('list_personal_signs')
+def handle_list_personal_signs():
+    """Send the device-local custom sign list to this browser."""
+    with sentence_lock:
+        signs = personal_sign_store.list_signs() if personal_sign_store else []
+    emit('personal_signs_list', {
+        'signs': signs
+    })
+
+
+@socketio.on('personal_sign_enroll_start')
+def handle_personal_sign_enroll_start(data):
+    """Begin automatically collecting three completed repetitions."""
+    global personal_sign_enrollment
+    if not session or not session.active:
+        emit('system_message', {'text': 'Start a communication session before enrolling a personal sign.', 'type': 'warning'})
+        return
+    if not slr_active:
+        emit('system_message', {'text': 'Start the camera before enrolling a personal sign.', 'type': 'warning'})
+        return
+    data = data or {}
+    name = ' '.join(str(data.get('name', '')).strip().split())[:48]
+    output_text = ' '.join(str(data.get('text', '')).strip().split())[:100]
+    if not name or not output_text:
+        emit('system_message', {'text': 'Enter both a sign name and the sentence text it should produce.', 'type': 'warning'})
+        return
+
+    with sentence_lock:
+        if personal_sign_enrollment is not None:
+            emit('system_message', {'text': 'Finish or cancel the current sign enrollment first.', 'type': 'warning'})
+            return
+        if frame_buffer:
+            frame_buffer.clear()
+        personal_sign_enrollment = {
+            'name': name,
+            'text': output_text,
+            'samples': [],
+        }
+        if sentence_builder:
+            sentence_builder.mark_activity()
+
+    emit('personal_sign_enrollment_status', {
+        'active': True,
+        'name': name,
+        'count': 0,
+        'required': REQUIRED_EXAMPLES,
+    })
+    emit('system_message', {
+        'text': f"Enrollment started for '{name}'. Perform the sign, pause until it is captured, then repeat it three times.",
+        'type': 'info'
+    })
+
+
+@socketio.on('personal_sign_enroll_cancel')
+def handle_personal_sign_enroll_cancel():
+    global personal_sign_enrollment
+    with sentence_lock:
+        personal_sign_enrollment = None
+        if frame_buffer:
+            frame_buffer.clear()
+        if sentence_builder:
+            sentence_builder.mark_activity()
+    emit('personal_sign_enrollment_status', {'active': False, 'message': 'Enrollment cancelled.'})
+
+
+@socketio.on('personal_sign_delete')
+def handle_personal_sign_delete(data):
+    data = data or {}
+    name = str(data.get('name', ''))
+    with sentence_lock:
+        deleted = bool(personal_sign_store and personal_sign_store.delete(name))
+        signs = personal_sign_store.list_signs() if deleted else None
+    if not deleted:
+        emit('system_message', {'text': 'That personal sign could not be found.', 'type': 'warning'})
+        return
+    emit('personal_signs_list', {'signs': signs})
+    emit('system_message', {'text': f"Personal sign '{name}' deleted from this device.", 'type': 'info'})
+
+
 @socketio.on('finish_sentence')
 def handle_finish_sentence():
     """Flush the current gloss sequence when the signer presses Send sentence."""
@@ -369,19 +540,25 @@ def handle_finish_sentence():
     pending_glosses = None
     active_sign_finalized = False
     with sentence_lock:
+        if personal_sign_enrollment is not None:
+            emit('system_message', {
+                'text': 'Complete or cancel personal sign enrollment before sending the sentence.',
+                'type': 'warning'
+            })
+            return
         stale_segment_discarded = bool(frame_buffer and frame_buffer.expire_stale_segment())
         active_sign_finalized = bool(frame_buffer and frame_buffer.is_sign_in_progress())
 
         # An explicit Send action marks the end of the current sign as well.
         # Predict it before flushing so the last sign is not left in the buffer.
-        if active_sign_finalized and tgcn is not None:
+        if active_sign_finalized:
             frame_buffer.force_finalize()
             if frame_buffer.is_ready():
-                prediction = tgcn.predict(frame_buffer.get_tgcn_tensor())
-                if prediction['confidence'] >= CONFIDENCE_THRESHOLD:
-                    gloss = prediction['gloss']
-                    text_layer.add_sign_gloss(gloss)
-                    sentence_builder.add_word(gloss)
+                prediction = recognize_sequence(frame_buffer.get_raw_sequence())
+                if prediction and prediction['confidence'] >= CONFIDENCE_THRESHOLD:
+                    sentence_text = prediction.get('output_text', prediction['gloss'])
+                    text_layer.add_sign_gloss(sentence_text)
+                    sentence_builder.add_word(sentence_text)
                     pending_glosses = list(sentence_builder.words)
 
         sentence = sentence_builder.force_flush()
@@ -398,6 +575,7 @@ def handle_finish_sentence():
         emit('slr_prediction', {
             'gloss': prediction['gloss'],
             'confidence': round(prediction['confidence'] * 100, 1),
+            'is_custom': bool(prediction.get('is_custom')),
             'top5': [
                 {'gloss': g, 'confidence': round(c * 100, 1)}
                 for g, c in prediction['top5']
@@ -431,15 +609,20 @@ def submit_sign_sentence(glosses):
 @socketio.on('reset_buffer')
 def handle_reset_buffer():
     """Reset the frame buffer."""
+    global personal_sign_enrollment
     with sentence_lock:
         if frame_buffer:
             frame_buffer.clear()
+        enrollment_cancelled = personal_sign_enrollment is not None
+        personal_sign_enrollment = None
         if sentence_builder:
             sentence_builder.words = []
         if text_layer:
             text_layer.clear()
     emit('buffer_fill', {'fill': 0})
     emit('sentence_preview', {'glosses': []})
+    if enrollment_cancelled:
+        emit('personal_sign_enrollment_status', {'active': False, 'message': 'Enrollment cancelled because the buffer was reset.'})
     emit('system_message', {'text': 'Buffer reset', 'type': 'info'})
 
 

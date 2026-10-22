@@ -5,6 +5,7 @@ asl/
 .env
 .env.*
 !.env.example
+instance/personal_signs.json
 
 # Python cache
 __pycache__/
@@ -14,6 +15,8 @@ __pycache__/
 # Model weights (too large for GitHub)
 models/tgcn/ckpt.pth
 models/holistic_landmarker.task
+models/signbart/*.pth
+models/signbart/*.safetensors
 
 # Temp files
 *.log

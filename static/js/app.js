@@ -22,6 +22,8 @@ let collectedSignCount = 0;
 // SLR state
 let webcamStream = null;
 let frameInterval = null;
+let cameraRecognitionActive = false;
+let personalEnrollmentActive = false;
 
 // STT state
 let recognition = null;
@@ -55,11 +57,14 @@ function initSocket() {
     socket.on('connect', () => {
         document.getElementById('connectionDot').classList.add('connected');
         document.getElementById('connectionText').textContent = 'Connected';
+        socket.emit('list_personal_signs');
     });
 
     socket.on('disconnect', () => {
         document.getElementById('connectionDot').classList.remove('connected');
         document.getElementById('connectionText').textContent = 'Disconnected';
+        cameraRecognitionActive = false;
+        personalEnrollmentActive = false;
         stopAllInputs();
     });
 
@@ -101,9 +106,30 @@ function initSocket() {
     });
 
     socket.on('slr_status', (data) => {
+        cameraRecognitionActive = !!data.active;
+        updatePersonalSignControls();
         if (!data.active) {
             addLog('Sign recognition stopped', 'info');
         }
+    });
+
+    socket.on('personal_signs_list', (data) => {
+        renderPersonalSigns(data.signs || []);
+    });
+
+    socket.on('personal_sign_enrollment_status', (data) => {
+        personalEnrollmentActive = !!data.active;
+        const status = document.getElementById('personalSignEnrollStatus');
+        if (status) {
+            if (data.active) {
+                status.textContent = `Recording ${data.name}: ${data.count}/${data.required} examples. Pause briefly after each repetition.`;
+            } else if (data.saved) {
+                status.textContent = `Saved “${data.name}”. It will be checked before the general sign model.`;
+            } else {
+                status.textContent = data.message || 'Ready to enroll a sign.';
+            }
+        }
+        updatePersonalSignControls();
     });
 
     // Message processing result
@@ -136,6 +162,7 @@ function startSession() {
 
 function onSessionStarted(data) {
     sessionActive = true;
+    updatePersonalSignControls();
     availableInputs = data.available_inputs;
     outputModes = data.output_modes;
 
@@ -185,6 +212,9 @@ function endSession() {
 
 function onSessionEnded() {
     sessionActive = false;
+    cameraRecognitionActive = false;
+    personalEnrollmentActive = false;
+    updatePersonalSignControls();
     stopAllInputs();
 
     // Switch screens
@@ -287,6 +317,7 @@ function startCurrentInput() {
     document.getElementById('toggleText').textContent = 'Stop';
     document.getElementById('toggleIcon').textContent = '\u23F9';
     document.getElementById('btnToggle').classList.add('active');
+    updatePersonalSignControls();
 
     switch (currentInputMode) {
         case 'sign': startSLR(); break;
@@ -300,6 +331,8 @@ function stopAllInputs() {
     document.getElementById('toggleText').textContent = 'Start';
     document.getElementById('toggleIcon').textContent = '\u25B6';
     document.getElementById('btnToggle').classList.remove('active');
+    cameraRecognitionActive = false;
+    updatePersonalSignControls();
 
     stopSLR();
     stopSTT();
@@ -397,6 +430,7 @@ function startSLR() {
         .then(stream => {
             webcamStream = stream;
             video.srcObject = stream;
+            configureVideoAspect(video);
             overlay.classList.add('hidden');
 
             // Refresh camera list once permissions are granted so labels appear
@@ -419,6 +453,7 @@ function startSLR() {
                     .then(stream => {
                         webcamStream = stream;
                         video.srcObject = stream;
+                        configureVideoAspect(video);
                         overlay.classList.add('hidden');
                         initCameraList();
                         socket.emit('start_slr');
@@ -453,6 +488,8 @@ function stopSLR() {
 
     const video = document.getElementById('webcam');
     if (video) video.srcObject = null;
+    const videoContainer = document.getElementById('videoContainer');
+    if (videoContainer) videoContainer.style.removeProperty('aspect-ratio');
 
     const overlay = document.getElementById('videoOverlay');
     if (overlay) overlay.classList.remove('hidden');
@@ -464,20 +501,37 @@ function stopSLR() {
     }
 }
 
+function configureVideoAspect(video) {
+    const applyAspect = () => {
+        const container = document.getElementById('videoContainer');
+        if (container && video.videoWidth && video.videoHeight) {
+            container.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+        }
+    };
+    if (video.readyState >= 1) applyAspect();
+    else video.addEventListener('loadedmetadata', applyAspect, { once: true });
+}
+
 function sendFrame(video) {
     // Drop frame if server is still processing the previous one (eliminates lag accumulation)
     if (isSendingFrame) return;
     if (!video || !video.videoWidth || !video.videoHeight) return;
 
-    // Resize before encoding to reduce CPU work and network payload size.
+    // Preserve the camera's aspect ratio so landmark x/y positions do not get
+    // stretched, while keeping the longest side at 320 pixels for lower latency.
+    const scale = 320 / Math.max(video.videoWidth, video.videoHeight);
+    const frameWidth = Math.max(1, Math.round(video.videoWidth * scale));
+    const frameHeight = Math.max(1, Math.round(video.videoHeight * scale));
     if (!offscreenCanvas) {
         offscreenCanvas = document.createElement('canvas');
-        offscreenCanvas.width = 320;
-        offscreenCanvas.height = 240;
+    }
+    if (offscreenCanvas.width !== frameWidth || offscreenCanvas.height !== frameHeight) {
+        offscreenCanvas.width = frameWidth;
+        offscreenCanvas.height = frameHeight;
     }
 
     const ctx = offscreenCanvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+    ctx.drawImage(video, 0, 0, frameWidth, frameHeight);
 
     isSendingFrame = true;
 
@@ -512,7 +566,7 @@ function drawLandmarks(data) {
         ctx.strokeStyle = 'rgba(0, 255, 200, 0.7)';
         ctx.lineWidth = 2;
         bodyConns.forEach(([i, j]) => {
-            if (i < body.length && j < body.length) {
+            if (i < body.length && j < body.length && body[i] && body[j]) {
                 ctx.beginPath();
                 ctx.moveTo(body[i][0] * w, body[i][1] * h);
                 ctx.lineTo(body[j][0] * w, body[j][1] * h);
@@ -520,7 +574,7 @@ function drawLandmarks(data) {
             }
         });
         body.forEach((pt, i) => {
-            if (i <= 24) {
+            if (i <= 24 && pt) {
                 ctx.fillStyle = 'rgba(0, 200, 255, 0.9)';
                 ctx.beginPath();
                 ctx.arc(pt[0] * w, pt[1] * h, 3, 0, Math.PI * 2);
@@ -576,26 +630,30 @@ function updateBufferBar(fill) {
     const bar = document.getElementById('bufferBar');
     const text = document.getElementById('bufferText');
     if (bar) bar.style.width = pct + '%';
-    if (text) text.textContent = 'Buffer: ' + pct + '%';
+    if (text) text.textContent = 'Capture: ' + pct + '%';
 }
 
 function showDetection(data) {
-    document.getElementById('detectedSign').textContent = data.gloss.toUpperCase();
+    document.getElementById('detectedSign').textContent =
+        (data.is_custom ? 'PERSONAL · ' : '') + String(data.gloss || '').toUpperCase();
     document.getElementById('detectedConf').textContent = data.confidence + '%';
 
     // Mini top-5
-    let html = '';
-    data.top5.forEach((item, i) => {
-        html += `<span class="top5-chip ${i === 0 ? 'top' : ''}">${item.gloss} ${item.confidence}%</span>`;
+    const container = document.getElementById('top5Mini');
+    container.replaceChildren();
+    (data.top5 || []).forEach((item, i) => {
+        const chip = document.createElement('span');
+        chip.className = 'top5-chip' + (i === 0 ? ' top' : '');
+        chip.textContent = `${item.gloss} ${item.confidence}%`;
+        container.appendChild(chip);
     });
-    document.getElementById('top5Mini').innerHTML = html;
 }
 
 function resetBuffer() {
     socket.emit('reset_buffer');
     document.getElementById('detectedSign').textContent = '---';
     document.getElementById('detectedConf').textContent = '';
-    document.getElementById('top5Mini').innerHTML = '';
+    document.getElementById('top5Mini').replaceChildren();
 }
 
 function finishSignSentence() {
@@ -610,6 +668,72 @@ function updateSentenceSendButton() {
         button.disabled = collectedSignCount === 0 &&
             !(sessionActive && isInputActive && currentInputMode === 'sign');
     }
+}
+
+function updatePersonalSignControls() {
+    const recordButton = document.getElementById('btnEnrollPersonalSign');
+    const cancelButton = document.getElementById('btnCancelPersonalSign');
+    if (!recordButton || !cancelButton) return;
+
+    recordButton.disabled = !sessionActive || !cameraRecognitionActive || personalEnrollmentActive;
+    cancelButton.classList.toggle('hidden', !personalEnrollmentActive);
+}
+
+function beginPersonalSignEnrollment() {
+    const name = document.getElementById('personalSignName').value.trim();
+    const text = document.getElementById('personalSignText').value.trim();
+    if (!name || !text) {
+        document.getElementById('personalSignEnrollStatus').textContent =
+            'Enter a sign name and the text it should add to the sentence.';
+        return;
+    }
+    socket.emit('personal_sign_enroll_start', { name, text });
+}
+
+function cancelPersonalSignEnrollment() {
+    if (socket && socket.connected) socket.emit('personal_sign_enroll_cancel');
+}
+
+function renderPersonalSigns(signs) {
+    const container = document.getElementById('personalSignsList');
+    const count = document.getElementById('personalSignCount');
+    if (!container || !count) return;
+
+    count.textContent = `${signs.length} saved`;
+    container.replaceChildren();
+    if (!signs.length) {
+        const empty = document.createElement('p');
+        empty.className = 'personal-sign-empty';
+        empty.textContent = 'No personal signs saved yet.';
+        container.appendChild(empty);
+        return;
+    }
+
+    signs.forEach(sign => {
+        const row = document.createElement('div');
+        row.className = 'personal-sign-item';
+
+        const copy = document.createElement('div');
+        copy.className = 'personal-sign-item-copy';
+        const name = document.createElement('div');
+        name.className = 'personal-sign-item-name';
+        name.textContent = sign.name;
+        const detail = document.createElement('div');
+        detail.className = 'personal-sign-item-detail';
+        detail.textContent = `Adds “${sign.text}” · ${sign.examples} examples`;
+        copy.append(name, detail);
+
+        const remove = document.createElement('button');
+        remove.className = 'personal-sign-delete';
+        remove.type = 'button';
+        remove.textContent = 'Delete';
+        remove.addEventListener('click', () => {
+            socket.emit('personal_sign_delete', { name: sign.name });
+        });
+
+        row.append(copy, remove);
+        container.appendChild(row);
+    });
 }
 
 // ================================================================
@@ -807,7 +931,13 @@ function addLog(text, type) {
                  now.getMinutes().toString().padStart(2, '0') + ':' +
                  now.getSeconds().toString().padStart(2, '0');
 
-    entry.innerHTML = `<span class="log-time">${time}</span> <span class="log-text">${text}</span>`;
+    const timeNode = document.createElement('span');
+    timeNode.className = 'log-time';
+    timeNode.textContent = time;
+    const textNode = document.createElement('span');
+    textNode.className = 'log-text';
+    textNode.textContent = text;
+    entry.append(timeNode, document.createTextNode(' '), textNode);
     area.appendChild(entry);
     area.scrollTop = area.scrollHeight;
 

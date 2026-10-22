@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=professional-light-2">
+    <link rel="stylesheet" href="/static/css/style.css?v=personal-signs-1">
 </head>
 <body>
     <!-- Top Navigation -->
@@ -184,7 +184,7 @@
 
                 <!-- Sign Language Input -->
                 <div class="input-view" id="signView">
-                    <div class="video-container">
+                    <div class="video-container" id="videoContainer">
                         <video id="webcam" autoplay playsinline muted></video>
                         <canvas id="overlayCanvas"></canvas>
                         <div class="video-overlay" id="videoOverlay">
@@ -192,7 +192,7 @@
                         </div>
                         <div class="buffer-bar-container">
                             <div class="buffer-bar" id="bufferBar"></div>
-                            <span class="buffer-text" id="bufferText">Buffer: 0%</span>
+                            <span class="buffer-text" id="bufferText">Capture: 0%</span>
                         </div>
                     </div>
                     <!-- Current detection -->
@@ -211,6 +211,48 @@
                             <span>Send sentence now</span><span>→</span>
                         </button>
                     </div>
+
+                    <details class="personal-sign-section" id="personalSignSection">
+                        <summary>
+                            <span>Personal signs</span>
+                            <span class="personal-sign-count" id="personalSignCount">0 saved</span>
+                        </summary>
+                        <div class="personal-sign-content">
+                            <p class="personal-sign-help">
+                                Add signs that matter to you. Record three repetitions; the examples stay on this device.
+                            </p>
+                            <div class="personal-sign-form">
+                                <label>
+                                    Sign name
+                                    <input class="personal-sign-input" id="personalSignName" maxlength="48"
+                                           placeholder="For example, my name" autocomplete="off">
+                                </label>
+                                <label>
+                                    Add this text to the sentence
+                                    <input class="personal-sign-input" id="personalSignText" maxlength="100"
+                                           placeholder="For example, Kavya" autocomplete="off">
+                                </label>
+                            </div>
+                            <div class="personal-sign-actions">
+                                <p class="personal-sign-enroll-status" id="personalSignEnrollStatus" aria-live="polite">
+                                    Start sign recognition to enroll a sign.
+                                </p>
+                                <div class="personal-sign-buttons">
+                                    <button class="ctrl-btn personal-enroll-btn" id="btnEnrollPersonalSign"
+                                            onclick="beginPersonalSignEnrollment()" disabled>
+                                        Record 3 examples
+                                    </button>
+                                    <button class="ctrl-btn secondary hidden" id="btnCancelPersonalSign"
+                                            onclick="cancelPersonalSignEnrollment()">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="personal-sign-list" id="personalSignsList" aria-live="polite">
+                                <p class="personal-sign-empty">No personal signs saved yet.</p>
+                            </div>
+                        </div>
+                    </details>
                 </div>
 
                 <!-- Speech Input -->
@@ -285,6 +327,6 @@
 
     <!-- Scripts -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
-    <script src="/static/js/app.js?v=professional-light"></script>
+    <script src="/static/js/app.js?v=personal-signs-1"></script>
 </body>
 </html>

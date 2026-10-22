@@ -1891,3 +1891,180 @@ body {
     background: #eeeafa;
     border-color: #e0daf2;
 }
+
+.personal-sign-section {
+    margin: 0 16px 16px;
+    overflow: hidden;
+    border: 1px solid #dce5ef;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.personal-sign-section > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 15px;
+    color: #293951;
+    font-family: 'Manrope', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    list-style-position: inside;
+}
+
+.personal-sign-count {
+    color: #66768d;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.personal-sign-content {
+    padding: 0 15px 15px;
+    border-top: 1px solid #e4eaf1;
+}
+
+.personal-sign-help,
+.personal-sign-empty {
+    margin: 12px 0;
+    color: #66768d;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.personal-sign-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.personal-sign-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: #485970;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.personal-sign-input {
+    width: 100%;
+    min-width: 0;
+    padding: 10px 11px;
+    border: 1px solid #d7e0eb;
+    border-radius: 8px;
+    outline: none;
+    background: #fff;
+    color: #25354d;
+    font: inherit;
+    font-size: 13px;
+}
+
+.personal-sign-input:focus {
+    border-color: #6b8ce5;
+    box-shadow: 0 0 0 3px rgba(76, 112, 218, 0.12);
+}
+
+.personal-sign-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.personal-sign-enroll-status {
+    margin: 0;
+    color: #617188;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.personal-sign-buttons {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+}
+
+.personal-enroll-btn {
+    background: #e8eefb;
+    border-color: #d5e0f7;
+    color: #3159b9;
+}
+
+.personal-enroll-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.personal-sign-list {
+    display: grid;
+    gap: 7px;
+    margin-top: 12px;
+}
+
+.personal-sign-empty {
+    margin: 0;
+}
+
+.personal-sign-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 11px;
+    border: 1px solid #e3e9f1;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.personal-sign-item-copy {
+    min-width: 0;
+}
+
+.personal-sign-item-name {
+    color: #293951;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.personal-sign-item-detail {
+    margin-top: 2px;
+    color: #697990;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.personal-sign-delete {
+    flex-shrink: 0;
+    padding: 6px 9px;
+    border: 1px solid #ead7d7;
+    border-radius: 7px;
+    background: #fff7f6;
+    color: #a44d4d;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+@media (max-width: 700px) {
+    .personal-sign-form {
+        grid-template-columns: 1fr;
+    }
+
+    .personal-sign-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .personal-sign-buttons {
+        width: 100%;
+    }
+
+    .personal-sign-buttons .ctrl-btn {
+        flex: 1;
+        justify-content: center;
+    }
+}

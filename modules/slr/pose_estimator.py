@@ -94,24 +94,29 @@ class PoseEstimator:
             results: HolisticLandmarkerResult object.
 
         Returns:
-            dict with keys 'body', 'left_hand', 'right_hand'.
+            dict with keys 'body', 'body_visibility', 'left_hand', 'right_hand'.
             Each value is a numpy array of shape (N, 2) with (x, y) coordinates
             normalized to [0, 1], or None if that body part wasn't detected.
+            body_visibility contains MediaPipe's per-point visibility values.
             - body: (33, 2)
             - left_hand: (21, 2)
             - right_hand: (21, 2)
         """
         landmarks = {
             'body': None,
+            'body_visibility': None,
             'left_hand': None,
             'right_hand': None
         }
 
         if results.pose_landmarks and len(results.pose_landmarks) > 0:
             body = []
+            visibility = []
             for lm in results.pose_landmarks:
                 body.append([lm.x, lm.y])
+                visibility.append(float(getattr(lm, 'visibility', 1.0)))
             landmarks['body'] = np.array(body, dtype=np.float32)
+            landmarks['body_visibility'] = np.array(visibility, dtype=np.float32)
 
         if results.left_hand_landmarks and len(results.left_hand_landmarks) > 0:
             left = []

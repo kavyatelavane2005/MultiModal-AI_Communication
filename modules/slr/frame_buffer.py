@@ -33,19 +33,21 @@ class FrameBuffer:
         # ---- Motion Detection State Machine ----
         self.state = SignState.IDLE
         self.prev_tracked = None  # Wrists and fingertips from previous frame
-        self.velocity_history = deque(maxlen=5)
+        self.velocity_history = deque(maxlen=3)
 
         # Thresholds tuned for MediaPipe coordinates
         # KeypointMapper scales coordinates to [-1, 1], so retain the same
         # effective motion thresholds used with the former [0, 1] coordinates.
         self.motion_start_threshold = 0.024
         self.motion_stop_threshold = 0.012
-        self.cooldown_frames = 10
+        # Four processed frames are enough to separate adjacent signs while
+        # avoiding the long wait caused by the previous ten-frame cooldown.
+        self.cooldown_frames = 4
         self.cooldown_counter = 0
         self.last_frame_time = None
 
         # Minimum frames for a valid sign (filters out accidental twitches)
-        self.min_sign_frames = 15
+        self.min_sign_frames = 10
 
         self._prediction_ready = False
 
@@ -107,7 +109,6 @@ class FrameBuffer:
             if self._point_is_visible(l_wrist) and self._point_is_visible(self.prev_tracked[1])
             else 0.0
         )
-        wrist_vel = (r_wrist_vel + l_wrist_vel) / 2.0
 
         # Hand Middle Fingertips: 13 + 12 = 25 (Left), 34 + 12 = 46 (Right)
         l_finger = keypoints[25]
@@ -122,9 +123,9 @@ class FrameBuffer:
             if self._point_is_visible(r_finger) and self._point_is_visible(self.prev_tracked[3])
             else 0.0
         )
-        finger_vel = (r_finger_vel + l_finger_vel) / 2.0
-
-        return max(wrist_vel, finger_vel)
+        # A one-handed sign should trigger from its active side; averaging the
+        # still and moving hands cut the signal in half and delayed segmentation.
+        return max(r_wrist_vel, l_wrist_vel, l_finger_vel, r_finger_vel)
 
     @staticmethod
     def _point_is_visible(point):
@@ -208,13 +209,27 @@ class FrameBuffer:
         Returns:
             Tensor with shape (num_samples, 55, 2), or None until a sign is ready.
         """
+        stacked = self.get_raw_sequence()
+        if stacked is None:
+            return None
+        return torch.from_numpy(stacked.astype(np.float32, copy=False))
+
+    def get_raw_sequence(self):
+        """Return and consume the finalized clip as a (T, 55, 2) NumPy array."""
         stacked = self._resample_sequence()
         if stacked is None:
             return None
-
-        tensor = torch.from_numpy(stacked.astype(np.float32, copy=False))
         self._consume_finalized_sequence()
-        return tensor
+        return stacked.astype(np.float32, copy=False)
+
+    @staticmethod
+    def sequence_to_tgcn_tensor(sequence):
+        """Convert a resampled (T, 55, 2) clip to TGCN's (1, 55, T*2) layout."""
+        stacked = np.asarray(sequence, dtype=np.float32)
+        if stacked.ndim != 3 or stacked.shape[1:] != (55, 2):
+            raise ValueError('Expected a sequence shaped (frames, 55, 2).')
+        arranged = stacked.transpose(1, 0, 2).reshape(55, stacked.shape[0] * 2)
+        return torch.from_numpy(arranged.copy()).unsqueeze(0)
 
     def get_tgcn_tensor(self):
         """Return the finalized clip in the TGCN checkpoint's exact input layout.
@@ -223,26 +238,21 @@ class FrameBuffer:
         KeypointMapper. The TGCN expects every keypoint's x/y values interleaved
         across time: (batch=1, keypoints=55, frames*2=100).
         """
-        stacked = self._resample_sequence()
+        stacked = self.get_raw_sequence()
         if stacked is None:
             return None
-
-        arranged = stacked.transpose(1, 0, 2).reshape(
-            self.num_keypoints, self.num_samples * 2
-        )
-        tensor = torch.from_numpy(arranged.astype(np.float32, copy=False)).unsqueeze(0)
-        self._consume_finalized_sequence()
-        return tensor
+        return self.sequence_to_tgcn_tensor(stacked)
 
     def get_tensor(self):
         """Return the finalized clip as a TGCN-ready (1, 55, 100) tensor."""
         return self.get_tgcn_tensor()
 
     def get_fill_ratio(self):
-        """Return buffer fill percentage (0.0 to 1.0) for UI."""
+        """Return sign-segmentation progress (0.0 to 1.0) for the UI."""
         if self.state == SignState.IDLE and not self._prediction_ready:
             return 0.0
-        return min(len(self.buffer) / self.num_samples, 1.0)
+        capture_target = max(self.min_sign_frames + self.cooldown_frames, 1)
+        return min(len(self.buffer) / capture_target, 1.0)
 
     def get_state(self):
         """Return state name."""
